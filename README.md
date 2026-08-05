@@ -24,6 +24,7 @@ Công cụ tự động hóa nhận diện nhân vật Re-ID và tự động v�
    * `Ctrl + Shift + Q`: Trở về thư mục gốc (Tất cả).
    * `Ctrl + Shift + 1` đến `9`: Chọn nhanh thư mục con từ 1 đến 9.
    * `Ctrl + Shift + Space` (Phím cách): **Tạm dừng / Tiếp tục** hoạt động của công cụ vẽ khung.
+   * `Ctrl + Shift + N`: Chuyển nhanh sang Query trống kế tiếp khi tự thu thập ảnh mẫu.
 6. **Tối ưu hóa khay hệ thống (System Tray)**:
    * Mặc định khởi động ẩn dưới System Tray để tránh làm phiền.
    * Click chuột trái 1 lần hoặc click chuột phải: Hiện danh sách Menu chức năng (có tích hợp chọn nhanh thư mục).

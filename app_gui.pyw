@@ -132,10 +132,10 @@ class GlobalHotkeyManager:
         HOTKEY_NEW_CAPTURE_QUERY = 103
         HOTKEY_NUM_BASE = 200 # 200 to 209 for 0 to 9
         
-        # Modifiers: Ctrl (0x0002) + Alt (0x0001) + Shift (0x0004) = 0x0007.
-        # This variant deliberately uses Ctrl+Alt+Shift so it can run at the
-        # same time as the original ReID Auto Draw, which owns Ctrl+Shift.
-        MODS = 0x0007
+        # Modifiers: Ctrl (0x0002) + Shift (0x0004) = 0x0006.
+        # Only one variant runs at a time, so this matches the original
+        # ReID Auto Draw's Ctrl+Shift shortcuts instead of stacking Alt on top.
+        MODS = 0x0006
 
         failed_hotkeys = []
 
@@ -143,30 +143,30 @@ class GlobalHotkeyManager:
             if not user32.RegisterHotKey(None, hotkey_id, modifiers, key):
                 failed_hotkeys.append(label)
 
-        # Ctrl+Alt+Shift+A (Previous), +D (Next), +Q (All/Root)
-        register(HOTKEY_PREV, MODS, 0x41, "Ctrl+Alt+Shift+A")
-        register(HOTKEY_NEXT, MODS, 0x44, "Ctrl+Alt+Shift+D")
-        register(HOTKEY_NUM_BASE + 0, MODS, 0x51, "Ctrl+Alt+Shift+Q")
+        # Ctrl+Shift+A (Previous), +D (Next), +Q (All/Root)
+        register(HOTKEY_PREV, MODS, 0x41, "Ctrl+Shift+A")
+        register(HOTKEY_NEXT, MODS, 0x44, "Ctrl+Shift+D")
+        register(HOTKEY_NUM_BASE + 0, MODS, 0x51, "Ctrl+Shift+Q")
 
-        # Ctrl+Alt+Shift+Space (Pause/Resume Toggle)
-        register(HOTKEY_TOGGLE, MODS, 0x20, "Ctrl+Alt+Shift+Space")
+        # Ctrl+Shift+Space (Pause/Resume Toggle)
+        register(HOTKEY_TOGGLE, MODS, 0x20, "Ctrl+Shift+Space")
         # MOD_NOREPEAT (0x4000) prevents one long press from skipping through
         # several empty Query slots.
         register(
             HOTKEY_NEW_CAPTURE_QUERY,
             MODS | 0x4000,
             0x4E,
-            "Ctrl+Alt+Shift+N",
+            "Ctrl+Shift+N",
         )
 
         # The original app installs a low-level hook that swallows plain Space
-        # while Blaze is focused. Two processes cannot share that keystroke, so
-        # this variant does not install it; use Ctrl+Alt+Shift+N instead.
+        # while Blaze is focused. This variant does not install it; use
+        # Ctrl+Shift+N instead.
         keyboard_hook = None
 
-        # Register Ctrl+Alt+Shift+1 to 9 (top-left number keys)
+        # Register Ctrl+Shift+1 to 9 (top-left number keys)
         for i in range(1, 10):
-            register(HOTKEY_NUM_BASE + i, MODS, 0x30 + i, f"Ctrl+Alt+Shift+{i}")
+            register(HOTKEY_NUM_BASE + i, MODS, 0x30 + i, f"Ctrl+Shift+{i}")
 
         # RegisterHotKey fails silently when another process already owns the
         # combination, which would otherwise look like a dead keyboard.
@@ -235,7 +235,7 @@ class GlobalHotkeyManager:
                     self.app.show_osd("🟢 ĐÃ TIẾP TỤC VẼ KHUNG")
         elif hotkey_id == 103: # Space in Blaze or global Shift+Space
             self.app.select_next_empty_capture_query()
-        elif 200 <= hotkey_id <= 209: # Ctrl+Alt+Shift+Q or 1 to 9
+        elif 200 <= hotkey_id <= 209: # Ctrl+Shift+Q or 1 to 9
             digit = hotkey_id - 200
             if digit == 0:
                 self._select_index(all_options, 0)
