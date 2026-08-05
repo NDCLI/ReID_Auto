@@ -113,9 +113,10 @@ FAST_ROOT_MAX_ROWS = 2
 # therefore at most (reference count - 1) result boxes may be drawn.
 LIMIT_MATCHES_BY_REFERENCE_COUNT = True
 
-# Keep False for correct global classification. Enable only when the UI domain
-# guarantees that a screenshot can contain exactly one query identity.
-ENFORCE_SINGLE_QUERY = False
+# Domain rule: each screenshot contains exactly one target person. Only the
+# query that draws the most boxes is kept (tie-break: highest total score);
+# all other queries' boxes are dropped.
+ENFORCE_SINGLE_QUERY = True
 
 # Scales to try for multi-scale template matching
 # Covers cases where reference images are at different sizes

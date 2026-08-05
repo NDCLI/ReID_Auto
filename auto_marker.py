@@ -67,6 +67,27 @@ def read_image_file(path: str, flags: int = cv2.IMREAD_COLOR) -> np.ndarray | No
     return cv2.imread(path, flags)
 
 
+def dominant_query_only(all_matches: list[dict]) -> list[dict]:
+    """Keep only the query that drew the most boxes.
+
+    Tie-break on highest total score. Used by the single-target domain rule:
+    each screenshot is assumed to contain exactly one person.
+    """
+    if not all_matches:
+        return all_matches
+    query_counts: dict[str, int] = {}
+    query_scores: dict[str, float] = {}
+    for m in all_matches:
+        q = m["query"]
+        query_counts[q] = query_counts.get(q, 0) + 1
+        query_scores[q] = query_scores.get(q, 0) + m["score"]
+    dominant_query = max(
+        query_counts.keys(),
+        key=lambda q: (query_counts[q], query_scores[q]),
+    )
+    return [m for m in all_matches if m["query"] == dominant_query]
+
+
 def write_image_file(path: str, image: np.ndarray) -> bool:
     """Write an image to a Windows path containing Unicode characters."""
     extension = os.path.splitext(path)[1] or ".png"
@@ -602,12 +623,17 @@ class TemplateMatcher:
         gray_screen = cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2GRAY)
         screen_h, screen_w = gray_screen.shape[:2]
 
+        # When the whole Query set is active, every reference must be scanned.
+        # Probing each ref at all 5 scales is ~5x slower (280 templates for 56
+        # refs). Scan scale 1.0 only; per-query mode still uses full MATCH_SCALES.
+        scales = MATCH_SCALES if self.target_query is not None else (1.0,)
+
         for query_name, refs in self.reference_images.items():
             for ref_name, ref_img, ref_feat in refs:
                 ref_gray = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
                 ref_h, ref_w = ref_gray.shape[:2]
 
-                for scale in MATCH_SCALES:
+                for scale in scales:
                     scaled_w = int(ref_w * scale)
                     scaled_h = int(ref_h * scale)
 
@@ -673,21 +699,10 @@ class TemplateMatcher:
                 
         all_matches = verified_matches
         
-        # Optional domain rule; disabled by default because it can hide valid
-        # identities in screenshots containing multiple people.
-        if ENFORCE_SINGLE_QUERY and all_matches:
-            query_counts = {}
-            query_scores = {}
-            for m in all_matches:
-                q = m['query']
-                query_counts[q] = query_counts.get(q, 0) + 1
-                query_scores[q] = query_scores.get(q, 0) + m['score']
-                
-            # Find the dominant query (highest count, tie-breaker: highest total score)
-            dominant_query = max(query_counts.keys(), key=lambda q: (query_counts[q], query_scores[q]))
-            
-            # Filter out all matches that do not belong to the dominant query
-            all_matches = [m for m in all_matches if m['query'] == dominant_query]
+        # Domain rule: each screenshot contains exactly one target person, so
+        # keep only the query with the most boxes (see ENFORCE_SINGLE_QUERY).
+        if ENFORCE_SINGLE_QUERY:
+            all_matches = dominant_query_only(all_matches)
 
         # VMS Grid Logic: Lọc chỉ giữ lại các match thuộc 2 hàng đầu tiên, và bỏ ảnh gốc ở góc trên trái
         if all_matches:
@@ -1006,8 +1021,29 @@ def get_clipboard_image() -> Image.Image | None:
     return None
 
 
+def _get_clipboard_sequence_number() -> int | None:
+    """Return Windows' clipboard generation number when available."""
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetClipboardSequenceNumber.restype = ctypes.c_uint32
+        return int(user32.GetClipboardSequenceNumber())
+    except (AttributeError, OSError):
+        return None
+
+
+def _clipboard_token(payload: bytes) -> str:
+    """Hash image bytes and include clipboard generation when available."""
+    digest = hashlib.md5(payload).hexdigest()
+    sequence = _get_clipboard_sequence_number()
+    return f"{sequence}:{digest}" if sequence is not None else digest
+
+
 def get_clipboard_image_hash() -> str | None:
-    """Get MD5 hash of current clipboard image for change detection."""
+    """Return a change token for the current clipboard image.
+
+    The Windows sequence number matters because ShareX can recapture the same
+    region, producing identical pixels but a new clipboard event.
+    """
     if not is_actual_screenshot():
         return None
         
@@ -1016,7 +1052,7 @@ def get_clipboard_image_hash() -> str | None:
         if img is not None:
             if isinstance(img, Image.Image):
                 small = img.resize((64, 64))
-                return hashlib.md5(small.tobytes()).hexdigest()
+                return _clipboard_token(small.tobytes())
             elif isinstance(img, list):
                 import time
                 hash_input = ""
@@ -1025,7 +1061,7 @@ def get_clipboard_image_hash() -> str | None:
                         if time.time() - os.path.getmtime(path) < 5.0:
                             hash_input += f"{path}:{os.path.getmtime(path)}"
                 if hash_input:
-                    return hashlib.md5(hash_input.encode()).hexdigest()
+                    return _clipboard_token(hash_input.encode())
     except Exception as e:
         print(f"[CLIPBOARD ImageGrab Hash WARNING] {e}")
         
@@ -1034,7 +1070,7 @@ def get_clipboard_image_hash() -> str | None:
         if fallback is not None:
             if isinstance(fallback, Image.Image):
                 small = fallback.resize((64, 64))
-                return hashlib.md5(small.tobytes()).hexdigest()
+                return _clipboard_token(small.tobytes())
             elif isinstance(fallback, (list, tuple)):
                 import time
                 hash_input = ""
@@ -1043,7 +1079,7 @@ def get_clipboard_image_hash() -> str | None:
                         if time.time() - os.path.getmtime(path) < 5.0:
                             hash_input += f"{path}:{os.path.getmtime(path)}"
                 if hash_input:
-                    return hashlib.md5(hash_input.encode()).hexdigest()
+                    return _clipboard_token(hash_input.encode())
     except Exception as e:
         print(f"[CLIPBOARD Win32 Fallback Hash WARNING] {e}")
         

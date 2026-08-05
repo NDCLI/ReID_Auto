@@ -193,6 +193,31 @@ class TestLogFunction(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Clipboard change token
+# ---------------------------------------------------------------------------
+class TestClipboardToken(unittest.TestCase):
+    """A repeated screenshot still counts as new after ShareX recaptures it."""
+
+    def test_sequence_number_distinguishes_identical_pixels(self):
+        from unittest.mock import patch
+
+        payload = b"same screenshot pixels"
+        with patch.object(auto_marker, "_get_clipboard_sequence_number", return_value=10):
+            first = auto_marker._clipboard_token(payload)
+        with patch.object(auto_marker, "_get_clipboard_sequence_number", return_value=11):
+            second = auto_marker._clipboard_token(payload)
+        self.assertNotEqual(first, second)
+
+    def test_falls_back_to_pixel_hash_without_windows_sequence(self):
+        from unittest.mock import patch
+
+        with patch.object(auto_marker, "_get_clipboard_sequence_number", return_value=None):
+            first = auto_marker._clipboard_token(b"same pixels")
+            second = auto_marker._clipboard_token(b"same pixels")
+        self.assertEqual(first, second)
+
+
+# ---------------------------------------------------------------------------
 # classify_item_query from batch_review
 # ---------------------------------------------------------------------------
 class TestClassifyItemQuery(unittest.TestCase):
@@ -224,6 +249,44 @@ class TestClassifyItemQuery(unittest.TestCase):
         from batch_review import classify_item_query
         matches = [{"score": 0.9}]
         self.assertEqual(classify_item_query(matches), "Chua_xac_dinh")
+
+
+# ---------------------------------------------------------------------------
+# dominant_query_only — single-target domain rule
+# ---------------------------------------------------------------------------
+class TestDominantQueryOnly(unittest.TestCase):
+    """auto_marker.dominant_query_only keeps only the query with the most boxes."""
+
+    def test_empty_input(self):
+        self.assertEqual(auto_marker.dominant_query_only([]), [])
+
+    def test_keeps_only_dominant_query_by_count(self):
+        matches = [
+            {"query": "Query_1", "bbox": (0, 0, 10, 10), "score": 0.6},
+            {"query": "Query_2", "bbox": (20, 0, 30, 10), "score": 0.9},
+            {"query": "Query_1", "bbox": (0, 20, 10, 30), "score": 0.7},
+        ]
+        result = auto_marker.dominant_query_only(matches)
+        self.assertTrue(all(m["query"] == "Query_1" for m in result))
+        self.assertEqual(len(result), 2)
+
+    def test_tie_break_by_total_score(self):
+        matches = [
+            {"query": "Query_1", "bbox": (0, 0, 10, 10), "score": 0.5},
+            {"query": "Query_1", "bbox": (0, 20, 10, 30), "score": 0.5},
+            {"query": "Query_2", "bbox": (20, 0, 30, 10), "score": 0.8},
+            {"query": "Query_2", "bbox": (20, 20, 30, 30), "score": 0.8},
+        ]
+        result = auto_marker.dominant_query_only(matches)
+        self.assertTrue(all(m["query"] == "Query_2" for m in result))
+        self.assertEqual(len(result), 2)
+
+    def test_single_query_untouched(self):
+        matches = [
+            {"query": "Query_1", "bbox": (0, 0, 10, 10), "score": 0.6},
+            {"query": "Query_1", "bbox": (0, 20, 10, 30), "score": 0.7},
+        ]
+        self.assertEqual(auto_marker.dominant_query_only(matches), matches)
 
 
 if __name__ == "__main__":

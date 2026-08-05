@@ -45,6 +45,10 @@ class TestConfigConstants(unittest.TestCase):
         """0.90 was tuned for TransReID and rejects almost every true match here."""
         self.assertLessEqual(config.AI_BEST_REFERENCE_THRESHOLD, 0.70)
 
+    def test_single_query_rule_enabled(self):
+        """Each screenshot is one target person, so only the dominant query is drawn."""
+        self.assertIs(config.ENFORCE_SINGLE_QUERY, True)
+
     def test_ai_thresholds(self):
         self.assertTrue(0.0 <= config.AI_MATCH_THRESHOLD <= 1.0)
         self.assertTrue(0.0 <= config.AI_MATCH_MARGIN <= 1.0)
