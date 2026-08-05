@@ -1,0 +1,33 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller
+*.spec
+build/
+dist/
+
+# Editor files
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# Local logs and environments
+*.log
+venv/
+.venv/
+env/
+ENV/
+
+# Project-specific user data (queries and outputs)
+queries/
+output/
+scratch/
+
+# Downloaded AI model binaries
+models/

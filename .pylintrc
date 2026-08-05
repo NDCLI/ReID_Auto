@@ -1,0 +1,30 @@
+[MASTER]
+# cv2 is a compiled C extension; pylint cannot introspect its members.
+extension-pkg-allow-list=cv2
+
+# Limit parallelism to keep memory usage manageable.
+jobs=1
+
+[MESSAGES CONTROL]
+# Disable warnings that are too noisy for this project:
+#   C0114/C0115/C0116 - missing docstrings (Vietnamese comments are used instead)
+#   C0103 - variable names like x1, y1, w, h are standard in image processing
+#   R0902 - too many instance attributes (GUI classes naturally have many)
+#   R0913 - too many arguments (image processing functions need multiple params)
+#   R0914 - too many local variables (complex algorithms)
+#   W0612 - unused variable (sometimes needed for unpacking)
+#   W0613 - unused argument (callback signatures require them)
+#   W0622 - redefining built-in (e.g., 'type' used as param name in ctypes calls)
+disable=C0114,C0115,C0116,C0103,R0902,R0913,R0914,W0612,W0613,W0622
+
+[FORMAT]
+max-line-length=120
+
+[BASIC]
+# Allow short variable names common in image processing (x, y, w, h, etc.)
+good-names=i,j,k,x,y,w,h,e,f,m,q,s,v,_
+
+[DESIGN]
+max-args=10
+max-locals=25
+max-attributes=20

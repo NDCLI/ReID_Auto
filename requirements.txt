@@ -1,0 +1,7 @@
+opencv-python>=4.8.0
+Pillow>=10.0.0
+pywin32>=306
+numpy>=1.24.0
+customtkinter>=5.2.0
+pystray>=0.19.5
+openvino>=2025.0.0

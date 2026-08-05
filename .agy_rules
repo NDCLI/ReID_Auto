@@ -1,0 +1,12 @@
+# ReID Auto Marker - Bounding Box Drawing Logic
+
+When modifying the bounding box logic in `auto_marker.py`, you must strictly adhere to the UI-anchored logic, NOT the person-anchored logic:
+1. **UI Structure**: 
+   - Gap between cards: `mean < 26` and `var < 5`.
+   - Dark gray card padding: `mean ~ 28` and `var < 5`.
+   - Light gray camera image: `mean ~ 40` (or `var >= 5` for the person).
+2. **Algorithm**:
+   - Start from the horizontal center of the person `mid_x`.
+   - Scan outwards to find the true gap (`gap_left` and `gap_right`). The pixels immediately inside the gap are `card_start` and `card_end`.
+   - The user requires exactly a **6px inset** from the card edge.
+   - **Clamping**: If the 6px inset falls inside the camera image (i.e. the light gray image `mean >= 32` or `var >= 5` starts before the 6px inset), clamp the bounding box to the edge of the camera image. Never cut into the light gray image.

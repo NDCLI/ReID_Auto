@@ -1,0 +1,1388 @@
+"""
+ReID Auto Draw Tool
+======================
+Monitors clipboard for screenshots from Snipping Tool,
+finds matching reference images using multi-scale template matching,
+draws colored boxes around matches, saves result to file and clipboard.
+
+Usage:
+    python auto_marker.py                      # Default settings
+    python auto_marker.py --threshold 0.75     # Custom threshold
+    python auto_marker.py --query Query_1      # Match only one query
+    python auto_marker.py --debug              # Show debug visualization
+    python auto_marker.py --single image.png   # Process a single image file
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from ai_model import AI_FeatureExtractor
+import time
+import hashlib
+import datetime
+import io
+import ctypes
+import argparse
+import numpy as np
+import cv2
+from PIL import Image, ImageGrab
+import win32clipboard
+
+from config import (
+    QUERIES_DIR, OUTPUT_DIR, MATCH_THRESHOLD, MATCH_SCALES,
+    BOX_THICKNESS, POLL_INTERVAL, QUERY_IMAGE_PREFIXES,
+    IGNORE_LEFT_RATIO, IGNORE_BOTTOM_RATIO, AI_MATCH_THRESHOLD,
+    AI_MATCH_MARGIN, AI_BEST_REFERENCE_THRESHOLD, AI_TOP_K_REFERENCES,
+    AI_REQUIRE_MODEL_AGREEMENT,
+    ENFORCE_SINGLE_QUERY, AUTO_CALIBRATION, AUTO_PIXEL_THRESHOLD,
+    AUTO_AI_THRESHOLD_FLOOR, AUTO_AI_THRESHOLD_CEILING,
+    AUTO_AI_THRESHOLD_TOLERANCE,
+    MAX_PIXEL_CANDIDATES, LIMIT_MATCHES_BY_REFERENCE_COUNT,
+    FAST_ROOT_MODE, FAST_ROOT_PRIMARY_MODEL, FAST_ROOT_SHORTLIST_THRESHOLD,
+    FAST_ROOT_MAX_ROWS, FACE_FEATURE_NAME, FACE_MATCH_THRESHOLD, FACE_MATCH_MARGIN,
+    FACE_MIN_REFERENCES,
+)
+
+
+# ============================================================
+# LOGGING HELPER
+# ============================================================
+def log(tag: str, message: str, color: str | None = None) -> None:
+    """Print a timestamped log message."""
+    timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+    print(f"  [{timestamp}] [{tag}] {message}")
+
+
+def read_image_file(path: str, flags: int = cv2.IMREAD_COLOR) -> np.ndarray | None:
+    """Read an image from a Windows path containing Unicode characters."""
+    try:
+        encoded = np.fromfile(path, dtype=np.uint8)
+        if encoded.size:
+            image = cv2.imdecode(encoded, flags)
+            if image is not None:
+                return image
+    except (OSError, ValueError):
+        pass
+    return cv2.imread(path, flags)
+
+
+def write_image_file(path: str, image: np.ndarray) -> bool:
+    """Write an image to a Windows path containing Unicode characters."""
+    extension = os.path.splitext(path)[1] or ".png"
+    success, encoded = cv2.imencode(extension, image)
+    if not success:
+        return False
+    try:
+        encoded.tofile(path)
+        return True
+    except OSError:
+        return False
+
+
+# ============================================================
+# TEMPLATE MATCHER
+# ============================================================
+class TemplateMatcher:
+    """Multi-scale template matching engine with NMS."""
+
+    def __init__(self, queries_dir: str, threshold: float = MATCH_THRESHOLD, target_query: str | None = None) -> None:
+        self.threshold = threshold
+        self.target_query = target_query
+        self.reference_images = {}   # {query_name: [(filename, cv2_image, feat), ...]}
+        self.query_images = {}       # {query_name: cv2_image} - excluded from matching
+        self.ai_extractor = AI_FeatureExtractor()
+        self.query_thresholds = {}
+        self._load_references(queries_dir)
+
+    def _is_query_image(self, filename: str) -> bool:
+        """Check if a file is a query/source image (should be excluded)."""
+        name_lower = os.path.splitext(filename)[0].lower()
+        return any(name_lower.startswith(prefix) for prefix in QUERY_IMAGE_PREFIXES)
+
+    def _load_references(self, queries_dir):
+        """Load all reference images from query folders."""
+        if not os.path.exists(queries_dir):
+            os.makedirs(queries_dir)
+            log("INIT", f"Created queries directory: {queries_dir}")
+            return
+
+        print("\n  Loading reference images...")
+        print("  " + "-" * 50)
+
+        import re
+        def natural_sort_key(s):
+            return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+
+        valid_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp')
+        
+        items = sorted(os.listdir(queries_dir), key=natural_sort_key)
+        has_query_folders = any(
+            os.path.isdir(os.path.join(queries_dir, name)) for name in items
+        )
+        for item_name in items:
+            item_path = os.path.join(queries_dir, item_name)
+            
+            if os.path.isdir(item_path):
+                query_name = item_name
+                # Filter by target query if specified
+                if self.target_query and query_name != self.target_query:
+                    continue
+
+                if query_name not in self.reference_images:
+                    self.reference_images[query_name] = []
+
+                for img_file in sorted(os.listdir(item_path), key=natural_sort_key):
+                    if not img_file.lower().endswith(valid_extensions):
+                        continue
+
+                    img_path = os.path.join(item_path, img_file)
+                    img = cv2.imread(img_path)
+                    if img is None:
+                        log("WARN", f"Cannot read: {img_path}")
+                        continue
+
+                    if self._is_query_image(img_file):
+                        self.query_images[query_name] = img
+                        log("QUERY", f"{query_name}/{img_file} (excluded from matching)")
+                    else:
+                        feat = self.ai_extractor.extract_feature(img)
+                        self.reference_images[query_name].append((img_file, img, feat))
+                        log("REF", f"{query_name}/{img_file} ({img.shape[1]}x{img.shape[0]})")
+                    time.sleep(0.01)  # Yield CPU to keep GUI responsive
+            else:
+                # Direct files in queries/ folder
+                # When named Query folders exist, loose images are test/source
+                # screenshots, not identities. Loading them as references would
+                # be both incorrect and very expensive.
+                if has_query_folders:
+                    continue
+                if not item_name.lower().endswith(valid_extensions):
+                    continue
+                    
+                query_name = "Query_Mac_Dinh"
+                if self.target_query and query_name != self.target_query:
+                    continue
+                    
+                if query_name not in self.reference_images:
+                    self.reference_images[query_name] = []
+                    
+                img = cv2.imread(item_path)
+                if img is None:
+                    continue
+                    
+                if self._is_query_image(item_name):
+                    self.query_images[query_name] = img
+                    log("QUERY", f"Root/{item_name} (excluded from matching)")
+                else:
+                    feat = self.ai_extractor.extract_feature(img)
+                    self.reference_images[query_name].append((item_name, img, feat))
+                    log("REF", f"Root/{item_name} ({img.shape[1]}x{img.shape[0]})")
+                time.sleep(0.01)  # Yield CPU to keep GUI responsive
+
+        total_refs = sum(len(refs) for refs in self.reference_images.values())
+        total_queries = len(self.reference_images)
+        print("  " + "-" * 50)
+        log("INIT", f"Loaded {total_refs} reference images from {total_queries} queries")
+        self._calibrate_query_thresholds()
+
+    def _calibrate_query_thresholds(self):
+        """Estimate a conservative acceptance threshold for every identity."""
+        for query_name, refs in self.reference_images.items():
+            pair_scores = []
+            for i in range(len(refs)):
+                for j in range(i + 1, len(refs)):
+                    score, individual = self.ai_extractor.ensemble_similarity(
+                        refs[i][2], refs[j][2]
+                    )
+                    if individual:
+                        pair_scores.append(score)
+
+            if AUTO_CALIBRATION and pair_scores:
+                low_intra_score = float(np.percentile(pair_scores, 10))
+                threshold = max(
+                    AUTO_AI_THRESHOLD_FLOOR,
+                    min(
+                        AUTO_AI_THRESHOLD_CEILING,
+                        low_intra_score - AUTO_AI_THRESHOLD_TOLERANCE,
+                    ),
+                )
+            else:
+                threshold = AI_MATCH_THRESHOLD
+
+            self.query_thresholds[query_name] = threshold
+            if pair_scores:
+                log(
+                    "CALIBRATE",
+                    f"{query_name}: AI threshold={threshold:.3f}, "
+                    f"intra range={min(pair_scores):.3f}-{max(pair_scores):.3f}",
+                )
+            else:
+                log("CALIBRATE", f"{query_name}: AI threshold={threshold:.3f} (need 2+ refs)")
+
+    def _classify_candidate(self, candidate_bgr):
+        """Classify a crop against every identity using open-set rejection."""
+        candidate_features = self.ai_extractor.extract_feature(candidate_bgr)
+        if not candidate_features:
+            return None
+
+        return self._classify_features(candidate_features)
+
+    def _classify_face_features(self, candidate_features):
+        """Use a confident face match to rescue clothing-change cases."""
+        query_results = []
+        for query_name, refs in self.reference_images.items():
+            scores = []
+            best_ref_name = None
+            best_ref_score = float("-inf")
+            for ref_name, _ref_img, ref_features in refs:
+                score = self.ai_extractor.face_similarity(candidate_features, ref_features)
+                if score is None:
+                    continue
+                scores.append(score)
+                if score > best_ref_score:
+                    best_ref_score = score
+                    best_ref_name = ref_name
+            if len(scores) >= FACE_MIN_REFERENCES:
+                k = min(AI_TOP_K_REFERENCES, len(scores))
+                query_results.append({
+                    "query": query_name,
+                    "ref_name": best_ref_name,
+                    "score": float(np.mean(sorted(scores, reverse=True)[:k])),
+                    "source": "face",
+                })
+
+        if not query_results:
+            return None
+        query_results.sort(key=lambda item: item["score"], reverse=True)
+        best = query_results[0]
+        second_score = query_results[1]["score"] if len(query_results) > 1 else -1.0
+        margin = best["score"] - second_score
+        if best["score"] < FACE_MATCH_THRESHOLD or margin < FACE_MATCH_MARGIN:
+            return None
+        best["margin"] = float(margin)
+        best["threshold"] = float(FACE_MATCH_THRESHOLD)
+        return best
+
+    def _classify_features(self, candidate_features):
+        """Apply the normal ensemble/open-set policy to existing embeddings."""
+
+        face_result = self._classify_face_features(candidate_features)
+
+        query_results = []
+        per_model_winners = {name: [] for name in candidate_features}
+
+        for query_name, refs in self.reference_images.items():
+            reference_scores = []
+            model_scores = {name: [] for name in candidate_features}
+            best_ref_name = None
+            best_ref_score = float("-inf")
+
+            for ref_name, _ref_img, ref_features in refs:
+                combined, individual = self.ai_extractor.ensemble_similarity(
+                    candidate_features, ref_features
+                )
+                if not individual:
+                    continue
+                reference_scores.append(combined)
+                for model_name, score in individual.items():
+                    model_scores[model_name].append(score)
+                if combined > best_ref_score:
+                    best_ref_score = combined
+                    best_ref_name = ref_name
+
+            if not reference_scores:
+                continue
+
+            k = min(AI_TOP_K_REFERENCES, len(reference_scores))
+            top_scores = sorted(reference_scores, reverse=True)[:k]
+            identity_score = float(np.mean(top_scores))
+            model_identity_scores = {
+                name: float(np.mean(sorted(scores, reverse=True)[:min(k, len(scores))]))
+                for name, scores in model_scores.items() if scores
+            }
+            query_results.append({
+                'query': query_name,
+                'ref_name': best_ref_name,
+                'score': identity_score,
+                'best_reference_score': float(best_ref_score),
+                'model_scores': model_identity_scores,
+            })
+            for model_name, score in model_identity_scores.items():
+                per_model_winners[model_name].append((score, query_name))
+
+        if not query_results:
+            return face_result
+
+        query_results.sort(key=lambda item: item['score'], reverse=True)
+        best = query_results[0]
+        second_score = query_results[1]['score'] if len(query_results) > 1 else -1.0
+        second_query = query_results[1]['query'] if len(query_results) > 1 else "N/A"
+        margin = best['score'] - second_score
+
+        identity_threshold = self.query_thresholds.get(best['query'], AI_MATCH_THRESHOLD)
+
+        # Log chi tiết top-2 để debug khi vẽ nhầm/bỏ sót
+        log(
+            "AI",
+            f"Top1: {best['query']} ({best['score']:.3f}) vs "
+            f"Top2: {second_query} ({second_score:.3f}), "
+            f"margin={margin:.3f} (cần≥{AI_MATCH_MARGIN:.3f}), "
+            f"thresh={identity_threshold:.3f}",
+        )
+
+        if best['score'] < identity_threshold or margin < AI_MATCH_MARGIN:
+            if margin < AI_MATCH_MARGIN and best['score'] >= identity_threshold:
+                log(
+                    "REJECT",
+                    f"Margin quá nhỏ ({margin:.3f}<{AI_MATCH_MARGIN:.3f}): "
+                    f"{best['query']} vs {second_query} — bỏ qua để tránh nhầm",
+                )
+            return face_result
+
+        if best['best_reference_score'] < AI_BEST_REFERENCE_THRESHOLD:
+            log(
+                "REJECT",
+                f"Ảnh tham chiếu tốt nhất {best['best_reference_score']:.3f}"
+                f"<{AI_BEST_REFERENCE_THRESHOLD:.3f}; loại ứng viên mơ hồ",
+            )
+            return face_result
+
+        if AI_REQUIRE_MODEL_AGREEMENT and len(per_model_winners) > 1:
+            winners = []
+            for ranked in per_model_winners.values():
+                if ranked:
+                    winners.append(max(ranked)[1])
+            if winners and any(winner != best['query'] for winner in winners):
+                return face_result
+
+        best['margin'] = float(margin)
+        best['threshold'] = float(identity_threshold)
+        best['reference_threshold'] = float(AI_BEST_REFERENCE_THRESHOLD)
+        best['source'] = "body"
+        return best
+
+    def _rank_features(self, candidate_features, model_names=None):
+        """Rank identities for a precomputed feature set without rejection."""
+        selected = set(model_names) if model_names is not None else None
+        ranked = []
+        for query_name, refs in self.reference_images.items():
+            scores = []
+            best_ref_name = None
+            best_ref_score = float("-inf")
+            for ref_name, _ref_img, ref_features in refs:
+                individual = {
+                    name: self.ai_extractor.compute_similarity(
+                        candidate_features[name], ref_features[name]
+                    )
+                    for name in candidate_features
+                    if name in ref_features and (selected is None or name in selected)
+                }
+                if not individual:
+                    continue
+                total_weight = sum(self.ai_extractor.weights[name] for name in individual)
+                combined = sum(
+                    score * self.ai_extractor.weights[name]
+                    for name, score in individual.items()
+                ) / total_weight
+                scores.append(combined)
+                if combined > best_ref_score:
+                    best_ref_score = combined
+                    best_ref_name = ref_name
+            if scores:
+                k = min(AI_TOP_K_REFERENCES, len(scores))
+                ranked.append({
+                    "query": query_name,
+                    "ref_name": best_ref_name,
+                    "score": float(np.mean(sorted(scores, reverse=True)[:k])),
+                })
+        return sorted(ranked, key=lambda item: item["score"], reverse=True)
+
+    @staticmethod
+    def _detect_result_grid(screenshot_bgr):
+        """Detect the regular Re-ID result cards; return [] for unknown layouts."""
+        gray = cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2GRAY)
+        screen_h, screen_w = gray.shape
+        content_x = int(screen_w * 0.30)
+
+        # Result-card rows have a large fraction of photographic pixels. This
+        # cleanly separates them from headings and the confidence controls.
+        row_activity = (gray[:, content_x:] > 45).mean(axis=1)
+        row_bands = []
+        start = None
+        for y, active in enumerate(row_activity > 0.12):
+            if active and start is None:
+                start = y
+            elif not active and start is not None:
+                if y - start >= max(80, int(screen_h * 0.15)):
+                    row_bands.append((start, y))
+                start = None
+        if start is not None and screen_h - start >= max(80, int(screen_h * 0.15)):
+            row_bands.append((start, screen_h))
+        row_bands = row_bands[:FAST_ROOT_MAX_ROWS]
+        if not row_bands:
+            return []
+
+        # At the top of a card the UI background is uniform, so combining a
+        # few scanlines yields exact card edges even when a person is dark.
+        y1, y2 = row_bands[0]
+        scan = gray[min(y1 + 6, y2 - 1):min(y1 + 28, y2)]
+        if scan.size == 0:
+            return []
+        column_mask = np.max(scan, axis=0) > 30
+        segments = []
+        start = None
+        for x in range(int(screen_w * 0.28), screen_w):
+            active = bool(column_mask[x])
+            if active and start is None:
+                start = x
+            elif not active and start is not None:
+                width = x - start
+                if int(screen_w * 0.04) <= width <= int(screen_w * 0.09):
+                    segments.append((start, x))
+                start = None
+        if len(segments) < 4:
+            return []
+
+        widths = [x2 - x1 for x1, x2 in segments]
+        card_width = int(round(float(np.median(widths))))
+        starts = [x1 for x1, _ in segments]
+        gaps = [b - a for a, b in zip(starts, starts[1:]) if b - a < card_width * 1.5]
+        pitch = int(round(float(np.median(gaps)))) if gaps else card_width + 4
+        first_x = min(starts)
+        if card_width < 40 or pitch <= card_width or pitch > card_width * 1.4:
+            return []
+
+        columns = []
+        x = first_x
+        while x + card_width <= screen_w and len(columns) < 20:
+            columns.append((x, min(screen_w, x + card_width)))
+            x += pitch
+        if len(columns) < 4:
+            return []
+
+        return [
+            (x1, ry1, x2, ry2)
+            for ry1, ry2 in row_bands
+            for x1, x2 in columns
+        ]
+
+    def _find_matches_fast_root(self, screenshot_bgr):
+        """Two-stage grid classifier used when the root Query folder is active."""
+        boxes = self._detect_result_grid(screenshot_bgr)
+        if not boxes or FAST_ROOT_PRIMARY_MODEL not in self.ai_extractor.models:
+            return None
+
+        # The top-left card is the source query shown again by the Re-ID UI.
+        boxes = boxes[1:]
+        shortlist = []
+        for bbox in boxes:
+            x1, y1, x2, y2 = bbox
+            crop = screenshot_bgr[y1:y2, x1:x2]
+            primary = self.ai_extractor.extract_feature(
+                crop, model_names=(FAST_ROOT_PRIMARY_MODEL,)
+            )
+            ranked = self._rank_features(primary, (FAST_ROOT_PRIMARY_MODEL,))
+            if ranked and ranked[0]["score"] >= FAST_ROOT_SHORTLIST_THRESHOLD:
+                shortlist.append((bbox, crop, primary, ranked[0]["score"]))
+
+        matches = []
+        remaining_models = tuple(
+            name for name in self.ai_extractor.active_models
+            if name != FAST_ROOT_PRIMARY_MODEL
+        )
+        if self.ai_extractor.face_model is not None:
+            remaining_models += (FACE_FEATURE_NAME,)
+        for bbox, crop, primary, primary_score in shortlist:
+            features = dict(primary)
+            features.update(
+                self.ai_extractor.extract_feature(crop, model_names=remaining_models)
+            )
+            # Reuse the normal conservative open-set classifier policy, but
+            # avoid recomputing the already extracted primary embedding.
+            classification = self._classify_features(features)
+            if classification:
+                classification.update({
+                    "bbox": bbox,
+                    "pixel_score": primary_score,
+                    "scale": 1.0,
+                })
+                matches.append(classification)
+
+        matches = self._limit_and_align_matches(matches)
+        log(
+            "FAST",
+            f"Grid {len(boxes) + 1} cards, shortlisted {len(shortlist)}, "
+            f"accepted {len(matches)}",
+        )
+        return matches
+
+    def _limit_and_align_matches(self, matches):
+        """Apply per-identity count limits and align boxes within each row."""
+        if LIMIT_MATCHES_BY_REFERENCE_COUNT and matches:
+            limited = []
+            for query_name in sorted({item["query"] for item in matches}):
+                query_matches = [
+                    item for item in matches if item["query"] == query_name
+                ]
+                max_boxes = max(
+                    0, len(self.reference_images.get(query_name, [])) - 1
+                )
+                query_matches.sort(
+                    key=lambda item: (
+                        item["score"], item.get("pixel_score", 0.0)
+                    ),
+                    reverse=True,
+                )
+                limited.extend(query_matches[:max_boxes])
+            matches = limited
+
+        if not matches:
+            return matches
+        ordered = sorted(matches, key=lambda item: item["bbox"][1])
+        rows = [[ordered[0]]]
+        for item in ordered[1:]:
+            if item["bbox"][1] - rows[-1][-1]["bbox"][1] < 50:
+                rows[-1].append(item)
+            else:
+                rows.append([item])
+        median_height = float(np.median([
+            item["bbox"][3] - item["bbox"][1] for item in matches
+        ]))
+        for row in rows:
+            center = float(np.median([
+                (item["bbox"][1] + item["bbox"][3]) / 2.0 for item in row
+            ]))
+            aligned_y1 = int(center - median_height / 2.0)
+            aligned_y2 = int(center + median_height / 2.0)
+            for item in row:
+                x1, _y1, x2, _y2 = item["bbox"]
+                item["bbox"] = (x1, aligned_y1, x2, aligned_y2)
+        return matches
+
+    def _remove_source_grid_match(self, matches, screenshot_bgr):
+        """Remove a match only when it overlaps the detected source card."""
+        if not matches:
+            return matches
+
+        grid_boxes = self._detect_result_grid(screenshot_bgr)
+        if not grid_boxes:
+            return matches
+
+        source_bbox = grid_boxes[0]
+        overlaps = [
+            (self._compute_iou(item["bbox"], source_bbox), item)
+            for item in matches
+        ]
+        if not overlaps:
+            return matches
+
+        overlap, source_match = max(overlaps, key=lambda pair: pair[0])
+        if overlap <= 0.30:
+            return matches
+
+        log(
+            "INFO",
+            f"Removed source card at ({source_match['bbox'][0]}, {source_match['bbox'][1]})",
+        )
+        return [item for item in matches if item is not source_match]
+
+
+    def find_matches(self, screenshot_bgr: np.ndarray, debug: bool = False) -> list[dict]:
+        """
+        Find all reference images within the screenshot.
+        Returns list of match dicts with: query, ref_name, bbox, score
+        """
+        if FAST_ROOT_MODE and self.target_query is None and len(self.reference_images) > 1:
+            fast_matches = self._find_matches_fast_root(screenshot_bgr)
+            if fast_matches is not None:
+                return fast_matches
+
+        all_matches = []
+        gray_screen = cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2GRAY)
+        screen_h, screen_w = gray_screen.shape[:2]
+
+        for query_name, refs in self.reference_images.items():
+            for ref_name, ref_img, ref_feat in refs:
+                ref_gray = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
+                ref_h, ref_w = ref_gray.shape[:2]
+
+                for scale in MATCH_SCALES:
+                    scaled_w = int(ref_w * scale)
+                    scaled_h = int(ref_h * scale)
+
+                    if scaled_w < 15 or scaled_h < 15:
+                        continue
+                    if scaled_w >= screen_w or scaled_h >= screen_h:
+                        continue
+
+                    resized_template = cv2.resize(ref_gray, (scaled_w, scaled_h))
+
+                    result = cv2.matchTemplate(
+                        gray_screen, resized_template, cv2.TM_CCOEFF_NORMED
+                    )
+
+                    # Step 1: Pixel Matching (Use threshold from slider/config)
+                    # This filters out completely different images before AI verification
+                    # Only keep local maxima. This avoids creating hundreds of
+                    # nearly identical candidates around one thumbnail.
+                    local_max = result >= cv2.dilate(result, np.ones((3, 3), np.uint8))
+                    pixel_threshold = AUTO_PIXEL_THRESHOLD if AUTO_CALIBRATION else self.threshold
+                    loc = np.where((result >= pixel_threshold) & local_max)
+                    for pt in zip(*loc[::-1]):
+                        x, y = pt
+                        pixel_score = float(result[y, x])
+                        
+                        if x < screen_w * IGNORE_LEFT_RATIO:
+                            continue
+                            
+                        # Exclude matches in the bottom portion of the screen
+                        if y > screen_h * (1.0 - IGNORE_BOTTOM_RATIO):
+                            continue
+
+                        all_matches.append({
+                            'source_query': query_name,
+                            'source_ref_name': ref_name,
+                            'bbox': (x, y, x + scaled_w, y + scaled_h),
+                            'pixel_score': pixel_score,
+                            'score': pixel_score,
+                            'scale': scale,
+                        })
+
+        # Apply Non-Maximum Suppression to remove overlapping boxes
+        all_matches = self._non_max_suppression(all_matches, iou_threshold=0.3)
+        if len(all_matches) > MAX_PIXEL_CANDIDATES:
+            all_matches = sorted(
+                all_matches, key=lambda item: item['pixel_score'], reverse=True
+            )[:MAX_PIXEL_CANDIDATES]
+        
+        # --- GLOBAL AI CLASSIFICATION ---
+        # Every crop is compared against every identity, regardless of which
+        # template proposed its location.
+        verified_matches = []
+        for m in all_matches:
+            x, y, x2, y2 = m['bbox']
+            candidate_bgr = screenshot_bgr[y:y2, x:x2]
+            if candidate_bgr.shape[0] < 10 or candidate_bgr.shape[1] < 10:
+                continue
+                
+            classification = self._classify_candidate(candidate_bgr)
+            if classification:
+                m.update(classification)
+                verified_matches.append(m)
+                
+        all_matches = verified_matches
+        
+        # Optional domain rule; disabled by default because it can hide valid
+        # identities in screenshots containing multiple people.
+        if ENFORCE_SINGLE_QUERY and all_matches:
+            query_counts = {}
+            query_scores = {}
+            for m in all_matches:
+                q = m['query']
+                query_counts[q] = query_counts.get(q, 0) + 1
+                query_scores[q] = query_scores.get(q, 0) + m['score']
+                
+            # Find the dominant query (highest count, tie-breaker: highest total score)
+            dominant_query = max(query_counts.keys(), key=lambda q: (query_counts[q], query_scores[q]))
+            
+            # Filter out all matches that do not belong to the dominant query
+            all_matches = [m for m in all_matches if m['query'] == dominant_query]
+
+        # VMS Grid Logic: Lọc chỉ giữ lại các match thuộc 2 hàng đầu tiên, và bỏ ảnh gốc ở góc trên trái
+        if all_matches:
+            y_coords = sorted(m['bbox'][1] for m in all_matches)
+            rows = []
+            current_row = [y_coords[0]]
+            for y in y_coords[1:]:
+                if y - current_row[-1] < 50:
+                    current_row.append(y)
+                else:
+                    rows.append(current_row)
+                    current_row = [y]
+            rows.append(current_row)
+            
+            allowed_max_y = max(rows[0])
+            if len(rows) > 1:
+                allowed_max_y = max(rows[1])
+            allowed_max_y += 30
+            
+            all_matches = [m for m in all_matches if m['bbox'][1] <= allowed_max_y]
+            
+            all_matches = self._remove_source_grid_match(all_matches, screenshot_bgr)
+
+        # A query folder contains the original image plus its expected results.
+        # Never draw more than (number of references - 1) boxes for an identity.
+        if LIMIT_MATCHES_BY_REFERENCE_COUNT and all_matches:
+            limited_matches = []
+            for query_name in sorted({m['query'] for m in all_matches}):
+                query_matches = [m for m in all_matches if m['query'] == query_name]
+                max_boxes = max(0, len(self.reference_images.get(query_name, [])) - 1)
+                query_matches.sort(
+                    key=lambda m: (m['score'], m.get('pixel_score', 0.0)),
+                    reverse=True,
+                )
+                if len(query_matches) > max_boxes:
+                    log(
+                        "LIMIT",
+                        f"{query_name}: keeping {max_boxes}/{len(query_matches)} "
+                        f"boxes from {len(self.reference_images.get(query_name, []))} refs",
+                    )
+                limited_matches.extend(query_matches[:max_boxes])
+            all_matches = limited_matches
+
+        # AUTO-ALIGNMENT LOGIC: Make all boxes have the exact same height and align perfectly in rows
+        if all_matches:
+            # Group into rows based on y1
+            sorted_matches = sorted(all_matches, key=lambda m: m['bbox'][1])
+            rows_of_matches = []
+            current_row_matches = [sorted_matches[0]]
+            
+            for m in sorted_matches[1:]:
+                if m['bbox'][1] - current_row_matches[-1]['bbox'][1] < 50:
+                    current_row_matches.append(m)
+                else:
+                    rows_of_matches.append(current_row_matches)
+                    current_row_matches = [m]
+            rows_of_matches.append(current_row_matches)
+            
+            # Global median height
+            heights = [m['bbox'][3] - m['bbox'][1] for m in all_matches]
+            median_h = float(np.median(heights))
+            
+            for row_matches in rows_of_matches:
+                y_centers = [(m['bbox'][1] + m['bbox'][3]) / 2.0 for m in row_matches]
+                median_y_center = float(np.median(y_centers))
+                
+                aligned_y1 = int(median_y_center - median_h / 2.0)
+                aligned_y2 = int(median_y_center + median_h / 2.0)
+                
+                for m in row_matches:
+                    m['bbox'] = (m['bbox'][0], aligned_y1, m['bbox'][2], aligned_y2)
+
+        return all_matches
+
+    def _non_max_suppression(self, matches: list[dict], iou_threshold: float = 0.3) -> list[dict]:
+        """Remove overlapping detections, keeping highest score."""
+        if not matches:
+            return []
+
+        # Sort by score (highest first)
+        matches.sort(key=lambda m: m['score'], reverse=True)
+
+        keep = []
+        for candidate in matches:
+            is_overlapping = False
+            for kept in keep:
+                if self._compute_iou(candidate['bbox'], kept['bbox']) > iou_threshold:
+                    is_overlapping = True
+                    break
+            if not is_overlapping:
+                keep.append(candidate)
+
+        return keep
+
+    @staticmethod
+    def _compute_iou(box_a: list | tuple, box_b: list | tuple) -> float:
+        """Compute Intersection over Union between two boxes."""
+        x1 = max(box_a[0], box_b[0])
+        y1 = max(box_a[1], box_b[1])
+        x2 = min(box_a[2], box_b[2])
+        y2 = min(box_a[3], box_b[3])
+
+        inter_area = max(0, x2 - x1) * max(0, y2 - y1)
+        area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+        area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+        union_area = area_a + area_b - inter_area
+
+        return inter_area / union_area if union_area > 0 else 0.0
+
+
+# ============================================================
+# BOX DRAWER
+# ============================================================
+def draw_match_boxes(image_bgr: np.ndarray, matches: list[dict]) -> np.ndarray:
+    """Draw red bounding boxes on the image."""
+    result = image_bgr.copy()
+    
+    # Create grayscale for boundary detection
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    h_img, w_img = gray.shape
+    
+    # Define a palette of vibrant colors for different queries (BGR format)
+    palette = [
+        (0, 0, 255),    # Red
+        (255, 0, 0),    # Blue
+        (0, 255, 0),    # Green
+        (0, 165, 255),  # Orange
+        (255, 0, 255),  # Magenta
+        (255, 255, 0),  # Cyan
+    ]
+    query_colors = {}
+
+    # Snap each match to the UI card, then apply the required 6px inset.
+    # If the camera image begins inside that inset, clamp to the image edge so
+    # the red border never cuts into the visible camera area.
+    for match in matches:
+        x1, y1, x2, y2 = match["bbox"]
+        x1 = max(0, min(int(x1), w_img - 1))
+        x2 = max(x1 + 1, min(int(x2), w_img))
+        y1 = max(0, min(int(y1), h_img - 1))
+        y2 = max(y1 + 1, min(int(y2), h_img - 1))
+
+        while y1 > 0 and gray[y1, x1:x2].mean() > 32:
+            y1 -= 1
+        while y2 < h_img - 1 and gray[y2, x1:x2].mean() > 32:
+            y2 += 1
+
+        check_y1 = y1 + (y2 - y1) // 4
+        check_y2 = y2 - (y2 - y1) // 4
+        if check_y2 <= check_y1:
+            check_y1, check_y2 = y1, max(y1 + 1, y2)
+        mid_x = (x1 + x2) // 2
+
+        gap_left = mid_x
+        while gap_left > 0:
+            column = gray[check_y1:check_y2, gap_left]
+            if column.mean() < 26 and column.var() < 5:
+                break
+            gap_left -= 1
+        card_start = gap_left + 1 if gap_left > 0 else 0
+
+        image_edge_left = card_start
+        for px in range(card_start, mid_x):
+            column = gray[check_y1:check_y2, px]
+            if column.mean() >= 32 or column.var() >= 5:
+                image_edge_left = px
+                break
+        new_x1 = min(card_start + 6, image_edge_left)
+
+        gap_right = mid_x
+        while gap_right < w_img - 1:
+            column = gray[check_y1:check_y2, gap_right]
+            if column.mean() < 26 and column.var() < 5:
+                break
+            gap_right += 1
+        card_end = gap_right - 1 if gap_right < w_img - 1 else w_img - 1
+
+        image_edge_right = card_end
+        for px in range(card_end, mid_x, -1):
+            column = gray[check_y1:check_y2, px]
+            if column.mean() >= 32 or column.var() >= 5:
+                image_edge_right = px
+                break
+        new_x2 = max(card_end - 6, image_edge_right)
+
+        match["bbox"] = (new_x1, y1, new_x2, y2)
+
+    for match in matches:
+        x1, y1, x2, y2 = match["bbox"]
+        query_name = match.get("query", "Query_1")
+        if query_name not in query_colors:
+            query_colors[query_name] = palette[len(query_colors) % len(palette)]
+        cv2.rectangle(result, (x1, y1), (x2, y2), query_colors[query_name], BOX_THICKNESS)
+
+    return result
+
+
+# ============================================================
+# CLIPBOARD UTILITIES
+# ============================================================
+def is_actual_screenshot() -> bool:
+    """Verify if the clipboard data looks like a pure screenshot (no HTML/URL metadata formats)."""
+    try:
+        blocked_keywords = ("html", "url", "chrome", "link", "mime")
+        win32clipboard.OpenClipboard()
+        try:
+            fmt = 0
+            while True:
+                fmt = win32clipboard.EnumClipboardFormats(fmt)
+                if fmt == 0:
+                    break
+                try:
+                    name = win32clipboard.GetClipboardFormatName(fmt)
+                    name_lower = name.lower()
+                    if any(kw in name_lower for kw in blocked_keywords):
+                        return False
+                except Exception:
+                    # GetClipboardFormatName raises pywintypes.error for
+                    # standard/system format IDs — safe to skip them.
+                    pass
+        finally:
+            win32clipboard.CloseClipboard()
+    except Exception:
+        # OpenClipboard / EnumClipboardFormats can also raise
+        # pywintypes.error when the clipboard is locked by another app.
+        pass
+    return True
+
+
+def get_clipboard_image_win32() -> Image.Image | list[str] | None:
+    try:
+        win32clipboard.OpenClipboard()
+        try:
+            # 1. Try CF_DIB (standard clipboard image format)
+            if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_DIB):
+                data = win32clipboard.GetClipboardData(win32clipboard.CF_DIB)
+                if data:
+                    header_size = int.from_bytes(data[:4], 'little')
+                    bit_count = int.from_bytes(data[14:16], 'little')
+                    if len(data) >= 36:
+                        colors_used = int.from_bytes(data[32:36], 'little')
+                    else:
+                        colors_used = 0
+                        
+                    if colors_used > 0:
+                        palette_size = colors_used * 4
+                    elif bit_count <= 8:
+                        palette_size = (2 ** bit_count) * 4
+                    else:
+                        palette_size = 0
+                        
+                    pixel_offset = 14 + header_size + palette_size
+                    file_size = 14 + len(data)
+                    
+                    bmp_header = b'BM' + \
+                                 file_size.to_bytes(4, 'little') + \
+                                 (0).to_bytes(4, 'little') + \
+                                 pixel_offset.to_bytes(4, 'little')
+                                 
+                    return Image.open(io.BytesIO(bmp_header + data))
+                    
+            # 2. Try CF_HDROP (copied files list)
+            if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_HDROP):
+                files = win32clipboard.GetClipboardData(win32clipboard.CF_HDROP)
+                if files:
+                    # Only return image files modified in the last 5.0 seconds
+                    import time
+                    valid_files = []
+                    valid_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp')
+                    for path in files:
+                        if isinstance(path, str) and os.path.exists(path) and path.lower().endswith(valid_exts):
+                            if time.time() - os.path.getmtime(path) < 5.0:
+                                valid_files.append(path)
+                    if valid_files:
+                        return valid_files
+        finally:
+            win32clipboard.CloseClipboard()
+    except Exception as e:
+        print(f"[WIN32 CLIPBOARD FALLBACK ERROR] {e}")
+    return None
+
+
+def get_clipboard_image() -> Image.Image | None:
+    """Get current image from clipboard, returns PIL Image or None."""
+    if not is_actual_screenshot():
+        return None
+        
+    try:
+        img = ImageGrab.grabclipboard()
+        if img is not None:
+            if isinstance(img, Image.Image):
+                return img
+            elif isinstance(img, list):
+                import time
+                valid_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp')
+                for path in img:
+                    if isinstance(path, str) and os.path.exists(path) and path.lower().endswith(valid_exts):
+                        if time.time() - os.path.getmtime(path) < 5.0:
+                            return Image.open(path)
+    except Exception as e:
+        print(f"[CLIPBOARD ImageGrab WARNING] {e}")
+
+    try:
+        fallback = get_clipboard_image_win32()
+        if fallback is not None:
+            if isinstance(fallback, Image.Image):
+                return fallback
+            elif isinstance(fallback, (list, tuple)):
+                valid_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp')
+                for path in fallback:
+                    if isinstance(path, str) and os.path.exists(path) and path.lower().endswith(valid_exts):
+                        return Image.open(path)
+    except Exception as e:
+        print(f"[CLIPBOARD Win32 Fallback WARNING] {e}")
+
+    return None
+
+
+def get_clipboard_image_hash() -> str | None:
+    """Get MD5 hash of current clipboard image for change detection."""
+    if not is_actual_screenshot():
+        return None
+        
+    try:
+        img = ImageGrab.grabclipboard()
+        if img is not None:
+            if isinstance(img, Image.Image):
+                small = img.resize((64, 64))
+                return hashlib.md5(small.tobytes()).hexdigest()
+            elif isinstance(img, list):
+                import time
+                hash_input = ""
+                for path in img:
+                    if isinstance(path, str) and os.path.exists(path):
+                        if time.time() - os.path.getmtime(path) < 5.0:
+                            hash_input += f"{path}:{os.path.getmtime(path)}"
+                if hash_input:
+                    return hashlib.md5(hash_input.encode()).hexdigest()
+    except Exception as e:
+        print(f"[CLIPBOARD ImageGrab Hash WARNING] {e}")
+        
+    try:
+        fallback = get_clipboard_image_win32()
+        if fallback is not None:
+            if isinstance(fallback, Image.Image):
+                small = fallback.resize((64, 64))
+                return hashlib.md5(small.tobytes()).hexdigest()
+            elif isinstance(fallback, (list, tuple)):
+                import time
+                hash_input = ""
+                for path in fallback:
+                    if isinstance(path, str) and os.path.exists(path):
+                        if time.time() - os.path.getmtime(path) < 5.0:
+                            hash_input += f"{path}:{os.path.getmtime(path)}"
+                if hash_input:
+                    return hashlib.md5(hash_input.encode()).hexdigest()
+    except Exception as e:
+        print(f"[CLIPBOARD Win32 Fallback Hash WARNING] {e}")
+        
+    return None
+
+
+def copy_image_to_clipboard(pil_image: Image.Image) -> None:
+    """Copy a PIL Image to Windows clipboard as BMP."""
+    output = io.BytesIO()
+    pil_image.convert('RGB').save(output, 'BMP')
+    bmp_data = output.getvalue()[14:]  # Skip BMP file header (14 bytes)
+    output.close()
+
+    for i in range(5):
+        try:
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardData(win32clipboard.CF_DIB, bmp_data)
+            finally:
+                win32clipboard.CloseClipboard()
+            break
+        except Exception as e:
+            time.sleep(0.1)
+            if i == 4:
+                log("ERROR", f"Failed to copy to clipboard: {e}")
+
+
+# ============================================================
+# NOTIFICATION
+# ============================================================
+def notify_sound(success: bool = True) -> None:
+    """Play a system sound notification and show a Windows toast."""
+    try:
+        from plyer import notification
+        
+        if success:
+            # MB_ICONASTERISK - info sound
+            ctypes.windll.user32.MessageBeep(0x00000040)
+            # Show toast notification without stealing focus
+            notification.notify(
+                title='ReID Auto Draw',
+                message='Đã vẽ xong và chép vào Clipboard!',
+                app_name='ReID Auto Draw',
+                timeout=2
+            )
+        else:
+            # MB_ICONHAND - error sound
+            ctypes.windll.user32.MessageBeep(0x00000010)
+            notification.notify(
+                title='ReID Auto Draw',
+                message='Không tìm thấy kết quả nào!',
+                app_name='ReID Auto Draw',
+                timeout=2
+            )
+    except (ImportError, OSError, RuntimeError) as e:
+        log("ERROR", f"Notification failed: {e}")
+
+
+# ============================================================
+# PROCESS SINGLE IMAGE
+# ============================================================
+def process_image(matcher: TemplateMatcher, image_bgr: np.ndarray, debug: bool = False) -> tuple[np.ndarray | None, list[dict]]:
+    """
+    Process a single image: find matches, draw boxes, return result.
+    Returns (marked_image_bgr, matches_list) or (None, []) if no matches.
+    """
+    log("SCAN", "Running template matching...")
+    start_time = time.time()
+
+    matches = matcher.find_matches(image_bgr, debug=debug)
+    elapsed = time.time() - start_time
+
+    if not matches:
+        log("RESULT", "No matches found after removing the original query image.")
+        return None, []
+
+    log("RESULT", f"Found {len(matches)} match(es) in {elapsed:.1f}s:")
+    for m in matches:
+        log("MATCH",
+            f"  {m['query']}/{m['ref_name']} "
+            f"(score: {m['score']:.3f}, scale: {m['scale']:.2f})")
+
+    # Draw boxes
+    marked = draw_match_boxes(image_bgr, matches)
+
+    return marked, matches
+
+
+def save_result(marked_bgr: np.ndarray, output_dir: str) -> str:
+    """Save marked image to output directory, returns filepath."""
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"marked_{timestamp}.png"
+    filepath = os.path.join(output_dir, filename)
+    cv2.imwrite(filepath, marked_bgr)
+    return filepath
+
+
+# ============================================================
+# CLIPBOARD MONITOR MODE
+# ============================================================
+def run_clipboard_monitor(matcher, output_dir, debug=False, stop_event=None, preview_callback=None):
+    """Main loop: monitor clipboard for new screenshots."""
+    print("\n" + "=" * 60)
+    log("READY", "Monitoring clipboard for screenshots...")
+    log("INFO", f"Output directory: {output_dir}")
+    log("INFO", "Press Ctrl+C to stop")
+    print("=" * 60 + "\n")
+
+    last_hash = get_clipboard_image_hash()
+    consecutive_errors = 0
+
+    try:
+        while True:
+            if stop_event and stop_event.is_set():
+                break
+            time.sleep(POLL_INTERVAL)
+
+            try:
+                current_hash = get_clipboard_image_hash()
+            except Exception:
+                consecutive_errors += 1
+                if consecutive_errors > 10:
+                    log("ERROR", "Too many clipboard read errors. Waiting 5s...")
+                    time.sleep(5)
+                    consecutive_errors = 0
+                continue
+
+            consecutive_errors = 0
+
+            # No image or same image as before
+            if current_hash is None or current_hash == last_hash:
+                continue
+
+            last_hash = current_hash
+            
+            # Check if we should ignore this clipboard change (because it came from our own Save & Copy)
+            if getattr(matcher, 'ignore_next_clipboard', False):
+                matcher.ignore_next_clipboard = False
+                log("INFO", "Ignoring clipboard change triggered by Preview Save.")
+                continue
+                
+            # --- NEW IMAGE DETECTED ---
+            log("DETECT", "New image found in clipboard.")
+            
+            pil_img = get_clipboard_image()
+            if pil_img is None:
+                continue
+                
+            current_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+            # --- PROCESS SCREENSHOT ---
+            # If preview_callback is provided, we don't draw or save here.
+            # We just find matches and pass to the callback.
+            start_time = time.time()
+            matches = matcher.find_matches(current_bgr, debug=debug)
+                        
+            elapsed = time.time() - start_time
+            if not matches:
+                log("RESULT", "No matches found.")
+                notify_sound(success=False)
+                
+                if preview_callback:
+                    preview_callback(current_bgr, [], matcher, output_dir)
+                    time.sleep(0.5)
+                    last_hash = get_clipboard_image_hash()
+                continue
+            log("RESULT", f"Found {len(matches)} match(es) in {elapsed:.1f}s.")
+            
+            if preview_callback:
+                # GUI handles drawing, saving, and putting to clipboard!
+                # It will also set matcher.ignore_next_clipboard = True when it saves
+                preview_callback(current_bgr, matches, matcher, output_dir)
+            else:
+                marked_bgr = draw_match_boxes(current_bgr.copy(), matches)
+                
+                # Save to file
+                filepath = save_result(marked_bgr, output_dir)
+                log("SAVE", f"Saved: {filepath}")
+
+                # Copy to clipboard
+                marked_pil = Image.fromarray(cv2.cvtColor(marked_bgr, cv2.COLOR_BGR2RGB))
+                copy_image_to_clipboard(marked_pil)
+
+                # Update hash to avoid re-processing our own clipboard write
+                time.sleep(0.2)
+                last_hash = get_clipboard_image_hash()
+
+                log("CLIPBOARD", "Marked image copied to clipboard!")
+                notify_sound(success=True)
+
+            print("-" * 50)
+
+    except KeyboardInterrupt:
+        print(f"\n{'=' * 60}")
+        log("STOP", "Clipboard monitoring stopped.")
+        print(f"{'=' * 60}")
+        if debug:
+            cv2.destroyAllWindows()
+
+
+# ============================================================
+# SINGLE FILE MODE
+# ============================================================
+def run_single_file(matcher, image_path, output_dir, debug=False):
+    """Process a single image file."""
+    if not os.path.exists(image_path):
+        log("ERROR", f"File not found: {image_path}")
+        sys.exit(1)
+
+    screenshot_bgr = cv2.imread(image_path)
+    if screenshot_bgr is None:
+        log("ERROR", f"Cannot read image: {image_path}")
+        sys.exit(1)
+
+    log("INFO", f"Processing: {image_path}")
+    log("INFO", f"Size: {screenshot_bgr.shape[1]}x{screenshot_bgr.shape[0]}")
+
+    marked_bgr, matches = process_image(matcher, screenshot_bgr, debug=debug)
+
+    if marked_bgr is None:
+        log("INFO", "No reference images found in this screenshot.")
+        return
+
+    # Save
+    filepath = save_result(marked_bgr, output_dir)
+    log("SAVE", f"Saved: {filepath}")
+
+    # Copy to clipboard
+    marked_pil = Image.fromarray(cv2.cvtColor(marked_bgr, cv2.COLOR_BGR2RGB))
+    copy_image_to_clipboard(marked_pil)
+    log("CLIPBOARD", "Marked image copied to clipboard!")
+
+    # Show result if debug
+    if debug:
+        debug_display = cv2.resize(
+            marked_bgr, (0, 0),
+            fx=min(1.0, 1400 / marked_bgr.shape[1]),
+            fy=min(1.0, 800 / marked_bgr.shape[0])
+        )
+        cv2.imshow("ReID Auto Draw Result", debug_display)
+        print("\n  Press any key to close...")
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+
+# ============================================================
+# MAIN
+# ============================================================
+def main():
+    parser = argparse.ArgumentParser(
+        description="ReID Auto Draw: Auto-detect and highlight matching images in screenshots"
+    )
+    parser.add_argument(
+        '--threshold', '-t', type=float, default=MATCH_THRESHOLD,
+        help=f'Match confidence threshold (0.0-1.0, default: {MATCH_THRESHOLD})'
+    )
+    parser.add_argument(
+        '--query', '-q', type=str, default=None,
+        help='Match only against a specific query folder (e.g., Query_1)'
+    )
+    parser.add_argument(
+        '--single', '-s', type=str, default=None,
+        help='Process a single image file instead of monitoring clipboard'
+    )
+    parser.add_argument(
+        '--debug', '-d', action='store_true',
+        help='Show debug visualization window'
+    )
+    parser.add_argument(
+        '--queries-dir', type=str, default=QUERIES_DIR,
+        help=f'Path to reference images directory (default: {QUERIES_DIR})'
+    )
+    parser.add_argument(
+        '--output-dir', type=str, default=OUTPUT_DIR,
+        help=f'Path to output directory (default: {OUTPUT_DIR})'
+    )
+
+    args = parser.parse_args()
+
+    # Banner
+    print()
+    print("  ╔════════════════════════════════════════════════╗")
+    print("  ║          IMAGE AUTO-MARKER v1.0               ║")
+    print("  ║  Auto-detect & highlight matching images      ║")
+    print("  ╚════════════════════════════════════════════════╝")
+    print()
+
+    # Show settings
+    log("CONFIG", f"Threshold: {args.threshold}")
+    log("CONFIG", f"Queries dir: {args.queries_dir}")
+    log("CONFIG", f"Output dir: {args.output_dir}")
+    if args.query:
+        log("CONFIG", f"Target query: {args.query}")
+    if args.debug:
+        log("CONFIG", "Debug mode: ON")
+
+    # Initialize matcher
+    matcher = TemplateMatcher(
+        queries_dir=args.queries_dir,
+        threshold=args.threshold,
+        target_query=args.query
+    )
+
+    total_refs = sum(len(refs) for refs in matcher.reference_images.values())
+    if total_refs == 0:
+        print()
+        log("WARNING", "No reference images found!")
+        print()
+        print("  Please add reference images to the queries directory:")
+        print(f"  {args.queries_dir}")
+        print()
+        print("  Expected structure:")
+        print("    queries/")
+        print("    ├── Query_1/")
+        print("    │   ├── _query.jpg      <- Query image (EXCLUDED)")
+        print("    │   ├── result_1.jpg    <- Will be matched")
+        print("    │   ├── result_2.jpg")
+        print("    │   └── result_3.jpg")
+        print("    ├── Query_2/")
+        print("    │   ├── _query.jpg")
+        print("    │   └── result_1.jpg")
+        print("    └── ...")
+        print()
+        print("  TIP: Use crop_tool.py to crop images from screenshots")
+        print("       python crop_tool.py <image_path> <query_name>")
+        print()
+        sys.exit(1)
+
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Run in appropriate mode
+    if args.single:
+        run_single_file(matcher, args.single, args.output_dir, args.debug)
+    else:
+        run_clipboard_monitor(matcher, args.output_dir, args.debug)
+
+
+if __name__ == "__main__":
+    main()
