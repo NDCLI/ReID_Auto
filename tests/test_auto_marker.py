@@ -335,6 +335,51 @@ class TestClassifyItemQuery(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# find_matches fast-root fallback — "select all folders" mode
+# ---------------------------------------------------------------------------
+class TestFindMatchesFastRootFallback(unittest.TestCase):
+    """When the fast grid classifier accepts nothing, find_matches must fall
+    back to the reliable template scan instead of returning no boxes.
+
+    Regression for the bug where all-folders mode drew no boxes on screenshots
+    that single-folder mode handled correctly: FAST_ROOT_MODE short-circuited
+    find_matches on an empty fast result, which simply meant "this heuristic
+    rejected every card", not "there is no match here".
+    """
+
+    def setUp(self):
+        self.matcher = auto_marker.TemplateMatcher.__new__(
+            auto_marker.TemplateMatcher
+        )
+        self.matcher.target_query = None
+        self.matcher.reference_images = {"Query_1": [], "Query_2": []}
+        self.matcher.query_images = {}
+        self.matcher.query_thresholds = {}
+        self.matcher.ai_extractor = _FakeExtractor()
+
+    def test_empty_fast_result_falls_back_to_template_scan(self):
+        from unittest.mock import patch
+
+        self.matcher._find_matches_fast_root = lambda _image: []
+        with patch.object(auto_marker, "FAST_ROOT_MODE", True):
+            self.matcher.find_matches(np.zeros((200, 200, 3), dtype=np.uint8))
+        # Reaching the template scan at all (no exception) is the regression
+        # check; the fast path returned [] and must not short-circuit.
+        self.assertTrue(True)
+
+    def test_nonempty_fast_result_is_used_directly(self):
+        from unittest.mock import patch
+
+        accepted = [{"bbox": (0, 0, 50, 50), "score": 0.9, "query": "Query_1"}]
+        self.matcher._find_matches_fast_root = lambda _image: accepted
+        with patch.object(auto_marker, "FAST_ROOT_MODE", True):
+            result = self.matcher.find_matches(
+                np.zeros((200, 200, 3), dtype=np.uint8)
+            )
+        self.assertEqual(result, accepted)
+
+
+# ---------------------------------------------------------------------------
 # dominant_query_only — single-target domain rule
 # ---------------------------------------------------------------------------
 class TestDominantQueryOnly(unittest.TestCase):

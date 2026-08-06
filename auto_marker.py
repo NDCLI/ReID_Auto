@@ -490,7 +490,16 @@ class TemplateMatcher:
         ]
 
     def _find_matches_fast_root(self, screenshot_bgr):
-        """Two-stage grid classifier used when the root Query folder is active."""
+        """Two-stage grid classifier used when the root Query folder is active.
+
+        This is an accelerator, not an authoritative answer. Returns a list of
+        accepted matches when the grid is detected and cards survive
+        shortlisting, or None when no fast path was possible (grid not detected
+        or the primary model is unavailable). The caller treats an empty result
+        the same as None and falls back to the full template scan: an empty
+        fast result only means "this heuristic accepted nothing", which must
+        not be trusted to mean "there is no match here".
+        """
         boxes = self._detect_result_grid(screenshot_bgr)
         if not boxes or FAST_ROOT_PRIMARY_MODEL not in self.ai_extractor.models:
             return None
@@ -617,17 +626,25 @@ class TemplateMatcher:
         """
         if FAST_ROOT_MODE and self.target_query is None and len(self.reference_images) > 1:
             fast_matches = self._find_matches_fast_root(screenshot_bgr)
-            if fast_matches is not None:
+            if fast_matches:
                 return fast_matches
+            # The fast grid classifier is an accelerator. When it produces no
+            # matches (grid not detected, or detected but every card rejected),
+            # fall back to the authoritative multi-scale template scan instead
+            # of concluding "no match". Single-folder mode always uses that scan,
+            # which is why it draws boxes the all-folders mode sometimes misses.
 
         all_matches = []
         gray_screen = cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2GRAY)
         screen_h, screen_w = gray_screen.shape[:2]
 
-        # When the whole Query set is active, every reference must be scanned.
-        # Probing each ref at all 5 scales is ~5x slower (280 templates for 56
-        # refs). Scan scale 1.0 only; per-query mode still uses full MATCH_SCALES.
-        scales = MATCH_SCALES if self.target_query is not None else (1.0,)
+        # Probe each reference at the full scale set regardless of folder mode.
+        # All-folders mode used to scan scale 1.0 only as a speed optimization,
+        # but thumbs in a Re-ID screenshot are rarely the exact pixel size of
+        # the stored reference (which is o.s. offset by the card padding). That
+        # left a real correctness gap: single-folder mode matched at 0.9-1.1
+        # while all-folders mode silently missed the same thumbnails.
+        scales = MATCH_SCALES
 
         for query_name, refs in self.reference_images.items():
             for ref_name, ref_img, ref_feat in refs:
