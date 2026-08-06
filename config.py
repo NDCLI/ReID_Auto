@@ -131,6 +131,11 @@ MATCH_SCALES = [
 # Box line thickness in pixels
 BOX_THICKNESS = 2
 
+# Review windows add a box by a single click on the card, not by dragging. A
+# card resolved from a click must be at least this many pixels wide and tall,
+# which rejects clicks that land in the gap between cards.
+CLICK_BOX_MIN_SIZE = 20
+
 # Color palette for different queries (BGR format for OpenCV)
 QUERY_COLORS = [
     (0, 0, 255),      # Red

@@ -66,59 +66,21 @@ class QueryAutoCollector:
         query_name = target_query
         score = 1.0
         second_score = -1.0
-        match_source = "manual" if target_query else "body"
+        match_source = "manual"
 
         if target_query:
             match = re.fullmatch(r"Query_(\d+)", target_query, flags=re.IGNORECASE)
             if not match or not 1 <= int(match.group(1)) <= MAX_QUERY_COUNT:
                 raise ValueError(f"Thư mục Query không hợp lệ: {target_query}")
         else:
-            ranked, per_model = _identity_scores(features, self.identities, self.extractor)
-            if ranked:
-                score, winner = ranked[0]
-                second_score = ranked[1][0] if len(ranked) > 1 else -1.0
-                model_winners = [max(scores)[1] for scores in per_model.values() if scores]
-                models_agree = not model_winners or all(name == winner for name in model_winners)
-                if (
-                    score >= self.similarity_threshold
-                    and score - second_score >= self.min_margin
-                    and models_agree
-                ):
-                    query_name = winner
+            raise ValueError("Không có Query đích được chọn.")
 
-            face_ranked = _face_identity_scores(features, self.identities, self.extractor)
-            if query_name is None and face_ranked:
-                face_score, face_winner = face_ranked[0]
-                face_second = face_ranked[1][0] if len(face_ranked) > 1 else -1.0
-                if (
-                    face_score >= FACE_MATCH_THRESHOLD
-                    and face_score - face_second >= FACE_MATCH_MARGIN
-                ):
-                    query_name = face_winner
-                    score = face_score
-                    second_score = face_second
-                    match_source = "face"
-
-        auto_created = query_name is None
-        created = auto_created or query_name not in self.identities
-        if auto_created:
-            # Re-scan on every new identity so a folder emptied while the app
-            # is running becomes immediately reusable.
-            self.next_query = _next_query_number(self.queries_dir)
-            if self.next_query is None:
-                raise ValueError(
-                    f"Đã đủ {MAX_QUERY_COUNT} Query; không tạo thêm Query mới."
-                )
-            query_name = f"Query_{self.next_query}"
-            self.identities[query_name] = []
-            score = 1.0
-        elif created:
+        created = query_name not in self.identities
+        if created:
             self.identities[query_name] = []
 
         query_dir = os.path.join(self.queries_dir, query_name)
         os.makedirs(query_dir, exist_ok=True)
-        if auto_created:
-            self.next_query = _next_query_number(self.queries_dir)
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         output_path = os.path.join(query_dir, f"capture_{timestamp}.png")
         if not write_image_file(output_path, image_bgr):
