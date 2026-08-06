@@ -104,6 +104,89 @@ class TestDrawMatchBoxes(unittest.TestCase):
 
         self.assertEqual(matches[0]["bbox"], (23, 9, 76, 100))
 
+
+# ---------------------------------------------------------------------------
+# Click-to-box in the review windows
+# ---------------------------------------------------------------------------
+class TestBoxAtPoint(unittest.TestCase):
+    """A single click resolves the card box using the drawing rules."""
+
+    @staticmethod
+    def _ui_card(camera_left, camera_right):
+        image = np.full((120, 100, 3), 20, dtype=np.uint8)
+        image[10:100, 20:80] = 28
+        image[10:100, camera_left:camera_right] = 40
+        return image
+
+    def test_click_matches_the_drawn_box(self):
+        image = self._ui_card(26, 74)
+        matches = [{"bbox": (30, 20, 70, 80), "query": "Query_1"}]
+        auto_marker.draw_match_boxes(image, matches)
+
+        self.assertEqual(auto_marker.box_at_point(image, 50, 50), matches[0]["bbox"])
+
+    def test_click_outside_image_returns_none(self):
+        image = self._ui_card(26, 74)
+
+        self.assertIsNone(auto_marker.box_at_point(image, 500, 50))
+        self.assertIsNone(auto_marker.box_at_point(image, -1, 50))
+
+    def test_click_in_card_gap_returns_none(self):
+        image = np.full((120, 100, 3), 20, dtype=np.uint8)
+
+        self.assertIsNone(auto_marker.box_at_point(image, 50, 50))
+
+
+class TestToggleBoxAtPoint(unittest.TestCase):
+    @staticmethod
+    def _ui_card():
+        image = np.full((120, 100, 3), 20, dtype=np.uint8)
+        image[10:100, 20:80] = 28
+        image[10:100, 26:74] = 40
+        return image
+
+    def test_click_adds_box_on_empty_card(self):
+        image = self._ui_card()
+        matches = []
+
+        self.assertTrue(auto_marker.toggle_box_at_point(image, matches, 50, 50, "Query_9"))
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["query"], "Query_9")
+        self.assertEqual(matches[0]["bbox"], auto_marker.box_at_point(image, 50, 50))
+
+    def test_click_inherits_query_from_existing_match(self):
+        image = self._ui_card()
+        matches = [{"bbox": (0, 0, 5, 5), "score": 1.0, "query": "Query_3"}]
+
+        auto_marker.toggle_box_at_point(image, matches, 50, 50, "Query_Mac_Dinh")
+
+        self.assertEqual(matches[-1]["query"], "Query_3")
+
+    def test_second_click_removes_the_box(self):
+        image = self._ui_card()
+        matches = []
+        auto_marker.toggle_box_at_point(image, matches, 50, 50)
+
+        self.assertTrue(auto_marker.toggle_box_at_point(image, matches, 50, 50))
+        self.assertEqual(matches, [])
+
+    def test_click_on_card_padding_removes_that_cards_box(self):
+        image = self._ui_card()
+        matches = [{"bbox": (30, 20, 70, 80), "query": "Query_1"}]
+        auto_marker.draw_match_boxes(image, matches)
+
+        # x=24 is card padding outside the drawn box but still on the same card.
+        self.assertTrue(auto_marker.toggle_box_at_point(image, matches, 24, 50))
+        self.assertEqual(matches, [])
+
+    def test_click_in_gap_changes_nothing(self):
+        image = np.full((120, 100, 3), 20, dtype=np.uint8)
+        matches = []
+
+        self.assertFalse(auto_marker.toggle_box_at_point(image, matches, 50, 50))
+        self.assertEqual(matches, [])
+
+
 # ---------------------------------------------------------------------------
 # Open-set body-ReID rejection
 # ---------------------------------------------------------------------------

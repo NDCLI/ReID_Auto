@@ -294,7 +294,7 @@ class AutoMarkerApp:
         self.query_collector = None
         self.auto_query_capture_enabled = True
         self.auto_query_capture = tk.BooleanVar(value=True)
-        self.capture_query_target = None
+        self.capture_query_target = "Query_1"
         
         self.current_queries_dir = QUERIES_DIR
         
@@ -393,7 +393,7 @@ class AutoMarkerApp:
 
         self.switch_auto_query = ctk.CTkSwitch(
             content_data,
-            text="Tự nhận ảnh chụp 1 người từ Clipboard và phân vào Query",
+            text="Tự nhận ảnh chụp 1 người từ Clipboard và lưu vào Query",
             variable=self.auto_query_capture,
             onvalue=True,
             offvalue=False,
@@ -559,18 +559,12 @@ class AutoMarkerApp:
                     max_existing = max(max_existing, int(match.group(1)))
         # Always show at least up to max_existing + 1 so the user can create the next one
         upper = max(max_existing + 1, 14)
-        options = ["Tự phân loại (AI)"] + [f"Query_{number}" for number in range(1, upper + 1)]
+        options = [f"Query_{number}" for number in range(1, upper + 1)]
         self.cmb_capture_query.configure(values=options)
         selection = self.capture_query_target or options[0]
         self.cmb_capture_query.set(selection)
 
     def on_capture_query_selected(self, selection):
-        if selection == "Tự phân loại (AI)":
-            self.capture_query_target = None
-            print("[AUTO QUERY] Đích chụp: AI tự phân loại.")
-            self.show_osd("📥 Query chụp: AI tự phân loại")
-            return
-
         self.capture_query_target = selection
         os.makedirs(os.path.join(QUERIES_DIR, selection), exist_ok=True)
         print(f"[AUTO QUERY] Đã khóa ảnh chụp vào {selection}.")
@@ -913,8 +907,10 @@ class AutoMarkerApp:
             if not self.check_is_reid_interface(current_bgr):
                 if self.auto_query_capture_enabled and self.query_collector:
                     try:
+                        # Always use the selected target query
+                        target = self.capture_query_target or "Query_1"
                         result = self.query_collector.add_crop(
-                            current_bgr, target_query=self.capture_query_target
+                            current_bgr, target_query=target
                         )
                         action = "tạo mới" if result["created"] else "thêm vào"
                         source = " qua khuôn mặt" if result.get("match_source") == "face" else ""

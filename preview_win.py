@@ -4,7 +4,13 @@ import customtkinter as ctk
 from PIL import Image, ImageTk
 import cv2
 import time
-from auto_marker import draw_match_boxes, save_result, copy_image_to_clipboard, notify_sound
+from auto_marker import (
+    draw_match_boxes,
+    save_result,
+    copy_image_to_clipboard,
+    notify_sound,
+    toggle_box_at_point,
+)
 
 class PreviewWindow(ctk.CTkToplevel):
     def __init__(self, master, current_bgr, matches, matcher, output_dir):
@@ -78,9 +84,9 @@ class PreviewWindow(ctk.CTkToplevel):
         btn_apply.pack(side=tk.LEFT, padx=10)
         
         lbl_tip = ctk.CTkLabel(
-            top_frame, 
-            text="(MẸO: Click khung để XÓA | Kéo chuột để VẼ THÊM | Chuột phải để LƯU NHANH)", 
-            text_color="#3498DB", 
+            top_frame,
+            text="(MẸO: Click vào ảnh để THÊM/XÓA khung | Chuột phải để LƯU NHANH)",
+            text_color="#3498DB",
             font=("Segoe UI", 11, "bold")
         )
         lbl_tip.pack(side=tk.LEFT, padx=20)
@@ -117,8 +123,6 @@ class PreviewWindow(ctk.CTkToplevel):
         self.canvas = tk.Canvas(self.canvas_frame, bg="#1E272C", highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.canvas.bind("<ButtonPress-1>", self.on_canvas_press)
-        self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
-        self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
         
         # Right click to Save & Copy
         self.canvas.bind("<Button-3>", lambda e: self.save_and_copy())
@@ -129,13 +133,7 @@ class PreviewWindow(ctk.CTkToplevel):
         
         self.photo = None
         self.scale_factor = 1.0
-        
-        # Drawing state
-        self.start_x = None
-        self.start_y = None
-        self.current_rect = None
-        self.is_drawing = False
-        
+
         self.draw_image()
 
     def on_scale_change(self, val):
@@ -196,59 +194,14 @@ class PreviewWindow(ctk.CTkToplevel):
 
     def on_canvas_press(self, event):
         real_x, real_y = self._get_real_coords(event.x, event.y)
-        if real_x is None: return
-        
-        # 1. Check if clicked inside any existing box (for deletion)
-        for m in self.matches:
-            bx1, by1, bx2, by2 = m['bbox']
-            if bx1 <= real_x <= bx2 and by1 <= real_y <= by2:
-                self.matches.remove(m)
-                self.draw_image()
-                return # Deleted, don't start drawing
-                
-        # 2. Start drawing a new box
-        self.is_drawing = True
-        self.start_x = event.x
-        self.start_y = event.y
-        self.current_rect = self.canvas.create_rectangle(self.start_x, self.start_y, self.start_x, self.start_y, outline="red", width=2)
+        if real_x is None:
+            return
 
-    def on_canvas_drag(self, event):
-        if self.is_drawing and self.current_rect:
-            self.canvas.coords(self.current_rect, self.start_x, self.start_y, event.x, event.y)
-
-    def on_canvas_release(self, event):
-        if not self.is_drawing: return
-        self.is_drawing = False
-        
-        if self.current_rect:
-            self.canvas.delete(self.current_rect)
-            self.current_rect = None
-            
-        real_x1, real_y1 = self._get_real_coords(self.start_x, self.start_y)
-        real_x2, real_y2 = self._get_real_coords(event.x, event.y)
-        
-        if real_x1 is not None and real_x2 is not None:
-            x1 = min(real_x1, real_x2)
-            y1 = min(real_y1, real_y2)
-            x2 = max(real_x1, real_x2)
-            y2 = max(real_y1, real_y2)
-            
-            width = x2 - x1
-            height = y2 - y1
-            
-            # Only add if it's a reasonably sized box (avoid accidental tiny clicks)
-            if width > 10 and height > 10:
-                target_query = "Query_Mac_Dinh"
-                if self.matches:
-                    target_query = self.matches[0]['query']
-                    
-                new_match = {
-                    'bbox': (int(x1), int(y1), int(x2), int(y2)),
-                    'score': 1.0,
-                    'query': target_query
-                }
-                self.matches.append(new_match)
-                self.draw_image()
+        target_query = self.matches[0]['query'] if self.matches else "Query_Mac_Dinh"
+        if toggle_box_at_point(
+            self.current_bgr, self.matches, real_x, real_y, target_query
+        ):
+            self.draw_image()
 
     def save_and_copy(self):
         # Restore matcher threshold

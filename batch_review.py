@@ -9,7 +9,12 @@ import cv2
 import customtkinter as ctk
 from PIL import Image, ImageTk
 
-from auto_marker import copy_image_to_clipboard, draw_match_boxes, write_image_file
+from auto_marker import (
+    copy_image_to_clipboard,
+    draw_match_boxes,
+    toggle_box_at_point,
+    write_image_file,
+)
 
 
 def classify_item_query(matches):
@@ -43,10 +48,6 @@ class BatchReviewWindow(ctk.CTkToplevel):
         self.current_index = 0
         self.photo = None
         self.scale_factor = 1.0
-        self.start_x = None
-        self.start_y = None
-        self.current_rect = None
-        self.is_drawing = False
         self._review_icon = None
 
         os.makedirs(output_dir, exist_ok=True)
@@ -113,8 +114,6 @@ class BatchReviewWindow(ctk.CTkToplevel):
         self.canvas = tk.Canvas(viewer, bg="#1E272C", highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
-        self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
-        self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
         self.bind("<Configure>", lambda _event: self._draw_current())
 
         controls = ctk.CTkFrame(self, fg_color="transparent")
@@ -195,7 +194,7 @@ class BatchReviewWindow(ctk.CTkToplevel):
                 f"{self.current_index + 1}/{len(self.items)} · "
                 f"{item['query']} · "
                 f"{len(item['matches'])} khung · ←/→ chuyển ảnh · "
-                "Click khung để xóa, kéo để thêm"
+                "Click vào ảnh để thêm/xóa khung"
             )
         )
         self._draw_current()
@@ -234,46 +233,14 @@ class BatchReviewWindow(ctk.CTkToplevel):
         real_x, real_y = self._real_coords(event.x, event.y)
         if real_x is None:
             return
-        matches = self.items[self.current_index]["matches"]
-        for match in list(matches):
-            x1, y1, x2, y2 = match["bbox"]
-            if x1 <= real_x <= x2 and y1 <= real_y <= y2:
-                matches.remove(match)
-                self.items[self.current_index]["query"] = classify_item_query(matches)
-                self.items[self.current_index]["saved"] = False
-                self._refresh_list()
-                self._draw_current()
-                return
-        self.is_drawing = True
-        self.start_x, self.start_y = event.x, event.y
-        self.current_rect = self.canvas.create_rectangle(
-            event.x, event.y, event.x, event.y, outline="red", width=2
-        )
-
-    def _on_canvas_drag(self, event):
-        if self.is_drawing and self.current_rect:
-            self.canvas.coords(self.current_rect, self.start_x, self.start_y, event.x, event.y)
-
-    def _on_canvas_release(self, event):
-        if not self.is_drawing:
+        item = self.items[self.current_index]
+        default_query = item["matches"][0]["query"] if item["matches"] else "Query_Mac_Dinh"
+        if not toggle_box_at_point(
+            item["image"], item["matches"], real_x, real_y, default_query
+        ):
             return
-        self.is_drawing = False
-        if self.current_rect:
-            self.canvas.delete(self.current_rect)
-            self.current_rect = None
-        x1, y1 = self._real_coords(self.start_x, self.start_y)
-        x2, y2 = self._real_coords(event.x, event.y)
-        if None in (x1, y1, x2, y2) or abs(x2 - x1) <= 10 or abs(y2 - y1) <= 10:
-            return
-        matches = self.items[self.current_index]["matches"]
-        query = matches[0]["query"] if matches else "Query_Mac_Dinh"
-        matches.append({
-            "bbox": (int(min(x1, x2)), int(min(y1, y2)), int(max(x1, x2)), int(max(y1, y2))),
-            "score": 1.0,
-            "query": query,
-        })
-        self.items[self.current_index]["query"] = classify_item_query(matches)
-        self.items[self.current_index]["saved"] = False
+        item["query"] = classify_item_query(item["matches"])
+        item["saved"] = False
         self._refresh_list()
         self._draw_current()
 

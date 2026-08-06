@@ -93,7 +93,7 @@ margin và từ chối giúp chương trình không tự đoán khi bằng chứ
 
 ### Tự thu thập và phân nhóm Query từ Clipboard
 
-Bật công tắc **Tự nhận ảnh chụp 1 người từ Clipboard và phân vào Query**, sau đó
+Bật công tắc **Tự nhận ảnh chụp 1 người từ Clipboard và lưu vào Query**, sau đó
 dùng Snipping Tool, ShareX hoặc công cụ chụp màn hình bất kỳ để chụp từng người
 một. Ngay khi ảnh vào Clipboard, công cụ sẽ:
 
@@ -114,8 +114,7 @@ Sau khi xử lý, cửa sổ thư viện cho phép:
 
 * Tự nhận diện, hiển thị và sắp xếp từng screenshot theo `Query_N`.
 * Chuyển qua lại giữa các ảnh.
-* Click vào khung để xóa kết quả sai.
-* Kéo chuột để bổ sung khung bị thiếu.
+* Click vào ảnh để thêm hoặc xóa khung (tự động snap theo quy tắc vẽ khung).
 * Lưu riêng ảnh đang duyệt hoặc lưu toàn bộ batch.
 
 Kết quả được lưu theo từng Query trong

@@ -32,6 +32,7 @@ import win32clipboard
 from config import (
     QUERIES_DIR, OUTPUT_DIR, MATCH_THRESHOLD, MATCH_SCALES,
     BOX_THICKNESS, POLL_INTERVAL, QUERY_IMAGE_PREFIXES,
+    CLICK_BOX_MIN_SIZE,
     IGNORE_LEFT_RATIO, IGNORE_BOTTOM_RATIO, AI_MATCH_THRESHOLD,
     AI_MATCH_MARGIN, AI_BEST_REFERENCE_THRESHOLD, AI_TOP_K_REFERENCES,
     AI_REQUIRE_MODEL_AGREEMENT,
@@ -816,14 +817,133 @@ class TemplateMatcher:
 # ============================================================
 # BOX DRAWER
 # ============================================================
+def _card_inset_x(gray: np.ndarray, mid_x: int, check_y1: int, check_y2: int) -> tuple[int, int]:
+    """Return the 6px-inset left/right edges of the card containing mid_x."""
+    w_img = gray.shape[1]
+
+    gap_left = mid_x
+    while gap_left > 0:
+        column = gray[check_y1:check_y2, gap_left]
+        if column.mean() < 26 and column.var() < 5:
+            break
+        gap_left -= 1
+    card_start = gap_left + 1 if gap_left > 0 else 0
+
+    image_edge_left = card_start
+    for px in range(card_start, mid_x):
+        column = gray[check_y1:check_y2, px]
+        if column.mean() >= 32 or column.var() >= 5:
+            image_edge_left = px
+            break
+
+    gap_right = mid_x
+    while gap_right < w_img - 1:
+        column = gray[check_y1:check_y2, gap_right]
+        if column.mean() < 26 and column.var() < 5:
+            break
+        gap_right += 1
+    card_end = gap_right - 1 if gap_right < w_img - 1 else w_img - 1
+
+    image_edge_right = card_end
+    for px in range(card_end, mid_x, -1):
+        column = gray[check_y1:check_y2, px]
+        if column.mean() >= 32 or column.var() >= 5:
+            image_edge_right = px
+            break
+
+    return min(card_start + 6, image_edge_left), max(card_end - 6, image_edge_right)
+
+
+def _snap_box_to_card(gray: np.ndarray, bbox: tuple) -> tuple[int, int, int, int]:
+    """Snap a box onto its UI card, then apply the required 6px inset.
+
+    If the camera image begins inside that inset, the box is clamped to the
+    image edge so the border never cuts into the visible camera area.
+    """
+    h_img, w_img = gray.shape
+    x1, y1, x2, y2 = bbox
+    x1 = max(0, min(int(x1), w_img - 1))
+    x2 = max(x1 + 1, min(int(x2), w_img))
+    y1 = max(0, min(int(y1), h_img - 1))
+    y2 = max(y1 + 1, min(int(y2), h_img - 1))
+
+    while y1 > 0 and gray[y1, x1:x2].mean() > 32:
+        y1 -= 1
+    while y2 < h_img - 1 and gray[y2, x1:x2].mean() > 32:
+        y2 += 1
+
+    check_y1 = y1 + (y2 - y1) // 4
+    check_y2 = y2 - (y2 - y1) // 4
+    if check_y2 <= check_y1:
+        check_y1, check_y2 = y1, max(y1 + 1, y2)
+
+    new_x1, new_x2 = _card_inset_x(gray, (x1 + x2) // 2, check_y1, check_y2)
+    return new_x1, y1, new_x2, y2
+
+
+def box_at_point(image_bgr: np.ndarray, x: float, y: float) -> tuple[int, int, int, int] | None:
+    """Return the card box under a click, or None when it lands off any card."""
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    h_img, w_img = gray.shape
+    click_x, click_y = int(round(x)), int(round(y))
+    if not (0 <= click_x < w_img and 0 <= click_y < h_img):
+        return None
+
+    # A short band around the click is enough to locate the card horizontally;
+    # _snap_box_to_card then re-measures it with the same rule used when drawing.
+    check_y1 = max(0, click_y - 3)
+    check_y2 = min(h_img, click_y + 4)
+    seed_x1, seed_x2 = _card_inset_x(gray, click_x, check_y1, check_y2)
+    if seed_x2 - seed_x1 < CLICK_BOX_MIN_SIZE:
+        return None
+
+    x1, y1, x2, y2 = _snap_box_to_card(gray, (seed_x1, click_y, seed_x2, click_y + 1))
+    if x2 - x1 < CLICK_BOX_MIN_SIZE or y2 - y1 < CLICK_BOX_MIN_SIZE:
+        return None
+    return x1, y1, x2, y2
+
+
+def toggle_box_at_point(
+    image_bgr: np.ndarray,
+    matches: list[dict],
+    x: float,
+    y: float,
+    default_query: str = "Query_Mac_Dinh",
+) -> bool:
+    """Add or remove the box for the card under a click; True when it changed."""
+    for match in list(matches):
+        bx1, by1, bx2, by2 = match["bbox"]
+        if bx1 <= x <= bx2 and by1 <= y <= by2:
+            matches.remove(match)
+            return True
+
+    bbox = box_at_point(image_bgr, x, y)
+    if bbox is None:
+        return False
+
+    # The click may land on the card padding outside an existing box; treat that
+    # as removing that card's box instead of stacking a duplicate on top of it.
+    for match in list(matches):
+        bx1, by1, bx2, by2 = match["bbox"]
+        if bbox[0] <= (bx1 + bx2) // 2 <= bbox[2] and bbox[1] <= (by1 + by2) // 2 <= bbox[3]:
+            matches.remove(match)
+            return True
+
+    matches.append({
+        "bbox": bbox,
+        "score": 1.0,
+        "query": matches[0]["query"] if matches else default_query,
+    })
+    return True
+
+
 def draw_match_boxes(image_bgr: np.ndarray, matches: list[dict]) -> np.ndarray:
     """Draw red bounding boxes on the image."""
     result = image_bgr.copy()
-    
+
     # Create grayscale for boundary detection
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    h_img, w_img = gray.shape
-    
+
     # Define a palette of vibrant colors for different queries (BGR format)
     palette = [
         (0, 0, 255),    # Red
@@ -835,60 +955,8 @@ def draw_match_boxes(image_bgr: np.ndarray, matches: list[dict]) -> np.ndarray:
     ]
     query_colors = {}
 
-    # Snap each match to the UI card, then apply the required 6px inset.
-    # If the camera image begins inside that inset, clamp to the image edge so
-    # the red border never cuts into the visible camera area.
     for match in matches:
-        x1, y1, x2, y2 = match["bbox"]
-        x1 = max(0, min(int(x1), w_img - 1))
-        x2 = max(x1 + 1, min(int(x2), w_img))
-        y1 = max(0, min(int(y1), h_img - 1))
-        y2 = max(y1 + 1, min(int(y2), h_img - 1))
-
-        while y1 > 0 and gray[y1, x1:x2].mean() > 32:
-            y1 -= 1
-        while y2 < h_img - 1 and gray[y2, x1:x2].mean() > 32:
-            y2 += 1
-
-        check_y1 = y1 + (y2 - y1) // 4
-        check_y2 = y2 - (y2 - y1) // 4
-        if check_y2 <= check_y1:
-            check_y1, check_y2 = y1, max(y1 + 1, y2)
-        mid_x = (x1 + x2) // 2
-
-        gap_left = mid_x
-        while gap_left > 0:
-            column = gray[check_y1:check_y2, gap_left]
-            if column.mean() < 26 and column.var() < 5:
-                break
-            gap_left -= 1
-        card_start = gap_left + 1 if gap_left > 0 else 0
-
-        image_edge_left = card_start
-        for px in range(card_start, mid_x):
-            column = gray[check_y1:check_y2, px]
-            if column.mean() >= 32 or column.var() >= 5:
-                image_edge_left = px
-                break
-        new_x1 = min(card_start + 6, image_edge_left)
-
-        gap_right = mid_x
-        while gap_right < w_img - 1:
-            column = gray[check_y1:check_y2, gap_right]
-            if column.mean() < 26 and column.var() < 5:
-                break
-            gap_right += 1
-        card_end = gap_right - 1 if gap_right < w_img - 1 else w_img - 1
-
-        image_edge_right = card_end
-        for px in range(card_end, mid_x, -1):
-            column = gray[check_y1:check_y2, px]
-            if column.mean() >= 32 or column.var() >= 5:
-                image_edge_right = px
-                break
-        new_x2 = max(card_end - 6, image_edge_right)
-
-        match["bbox"] = (new_x1, y1, new_x2, y2)
+        match["bbox"] = _snap_box_to_card(gray, match["bbox"])
 
     for match in matches:
         x1, y1, x2, y2 = match["bbox"]
