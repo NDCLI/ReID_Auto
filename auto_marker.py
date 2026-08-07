@@ -43,7 +43,9 @@ from config import (
     FAST_ROOT_MODE, FAST_ROOT_PRIMARY_MODEL, FAST_ROOT_SHORTLIST_THRESHOLD,
     FAST_ROOT_MAX_ROWS, FACE_FEATURE_NAME, FACE_MATCH_THRESHOLD, FACE_MATCH_MARGIN,
     FACE_MIN_REFERENCES,
+    ENABLE_OCR_TIMESTAMP_FILTER, OCR_TIMESTAMP_TOLERANCE, OCR_METHOD,
 )
+from ocr_utils import extract_timestamp, extract_reference_timestamp, timestamps_match
 
 
 # ============================================================
@@ -113,6 +115,7 @@ class TemplateMatcher:
         self.target_query = target_query
         self.reference_images = {}   # {query_name: [(filename, cv2_image, feat), ...]}
         self.query_images = {}       # {query_name: cv2_image} - excluded from matching
+        self.reference_timestamps = {}  # {query_name: [timestamp_string, ...]}
         self.ai_extractor = AI_FeatureExtractor()
         self.query_thresholds = {}
         self._load_references(queries_dir)
@@ -154,6 +157,9 @@ class TemplateMatcher:
                 if query_name not in self.reference_images:
                     self.reference_images[query_name] = []
 
+                # Extract timestamps from reference images using Windows OCR
+                # (same engine as Windows 11 Photos) or Tesseract fallback.
+                ref_timestamps_for_query = []
                 for img_file in sorted(os.listdir(item_path), key=natural_sort_key):
                     if not img_file.lower().endswith(valid_extensions):
                         continue
@@ -170,8 +176,22 @@ class TemplateMatcher:
                     else:
                         feat = self.ai_extractor.extract_feature(img)
                         self.reference_images[query_name].append((img_file, img, feat))
-                        log("REF", f"{query_name}/{img_file} ({img.shape[1]}x{img.shape[0]})")
+
+                        # OCR: extract timestamp from reference image
+                        ref_ts = None
+                        if ENABLE_OCR_TIMESTAMP_FILTER:
+                            ref_ts = extract_reference_timestamp(img)
+                            if ref_ts:
+                                ref_timestamps_for_query.append(ref_ts)
+
+                        ts_info = f" | OCR: {ref_ts}" if ref_ts else ""
+                        log("REF", f"{query_name}/{img_file} ({img.shape[1]}x{img.shape[0]}){ts_info}")
                     time.sleep(0.01)  # Yield CPU to keep GUI responsive
+
+                # Store ALL timestamps for this query (each ref may be at a different time)
+                if ref_timestamps_for_query and ENABLE_OCR_TIMESTAMP_FILTER:
+                    self.reference_timestamps[query_name] = ref_timestamps_for_query
+                    log("OCR", f"{query_name}: timestamps = {ref_timestamps_for_query}")
             else:
                 # Direct files in queries/ folder
                 # When named Query folders exist, loose images are test/source
@@ -624,9 +644,22 @@ class TemplateMatcher:
         Find all reference images within the screenshot.
         Returns list of match dicts with: query, ref_name, bbox, score
         """
+        # Extract timestamp from screenshot for comparison
+        screenshot_timestamp = None
+        if ENABLE_OCR_TIMESTAMP_FILTER:
+            try:
+                screenshot_timestamp = extract_timestamp(screenshot_bgr, method=OCR_METHOD)
+                if screenshot_timestamp:
+                    log("OCR", f"Screenshot timestamp: {screenshot_timestamp}")
+            except Exception as e:
+                log("OCR", f"Screenshot timestamp extraction failed: {e}")
+
         if FAST_ROOT_MODE and self.target_query is None and len(self.reference_images) > 1:
             fast_matches = self._find_matches_fast_root(screenshot_bgr)
             if fast_matches:
+                # Apply timestamp filtering to fast matches
+                if ENABLE_OCR_TIMESTAMP_FILTER:
+                    fast_matches = self._filter_matches_by_timestamp(fast_matches, screenshot_timestamp)
                 return fast_matches
             # The fast grid classifier is an accelerator. When it produces no
             # matches (grid not detected, or detected but every card rejected),
@@ -793,7 +826,60 @@ class TemplateMatcher:
                 for m in row_matches:
                     m['bbox'] = (m['bbox'][0], aligned_y1, m['bbox'][2], aligned_y2)
 
+        # Apply timestamp filtering at the end
+        if ENABLE_OCR_TIMESTAMP_FILTER:
+            all_matches = self._filter_matches_by_timestamp(all_matches, screenshot_timestamp)
+
         return all_matches
+
+    def _filter_matches_by_timestamp(self, matches: list[dict], screenshot_timestamp: str | None) -> list[dict]:
+        """Filter matches based on timestamp comparison.
+
+        Only keep matches where at least one reference timestamp matches
+        the screenshot timestamp (within tolerance).
+        If timestamps cannot be compared (missing or extraction failed),
+        allow the match.
+        """
+        if not matches:
+            return matches
+
+        if screenshot_timestamp is None:
+            # No screenshot timestamp available, cannot filter by time
+            log("OCR", "No screenshot timestamp detected, skipping timestamp filter")
+            return matches
+
+        filtered_matches = []
+        for match in matches:
+            query_name = match.get('query')
+            ref_timestamps = self.reference_timestamps.get(query_name)
+
+            if not ref_timestamps:
+                # No reference timestamps — can't filter, allow match
+                filtered_matches.append(match)
+                continue
+
+            # Check if screenshot time matches ANY reference time
+            any_match = any(
+                timestamps_match(ref_ts, screenshot_timestamp,
+                                 tolerance_minutes=OCR_TIMESTAMP_TOLERANCE)
+                for ref_ts in ref_timestamps
+            )
+            if any_match:
+                filtered_matches.append(match)
+            else:
+                log(
+                    "OCR",
+                    f"Rejected {query_name}: timestamp mismatch "
+                    f"(refs={ref_timestamps}, screenshot={screenshot_timestamp})"
+                )
+
+        if filtered_matches != matches:
+            log(
+                "OCR",
+                f"Timestamp filter: {len(matches)} -> {len(filtered_matches)} matches"
+            )
+
+        return filtered_matches
 
     def _non_max_suppression(self, matches: list[dict], iou_threshold: float = 0.3) -> list[dict]:
         """Remove overlapping detections, keeping highest score."""

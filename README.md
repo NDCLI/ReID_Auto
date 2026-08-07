@@ -9,7 +9,12 @@ Công cụ tự động hóa nhận diện nhân vật Re-ID và tự động v�
 1. **Giám sát Clipboard thông minh**:
    * Tự động nhận diện khi bạn vừa chụp ảnh màn hình mới (hỗ trợ cả **Snipping Tool** và **ShareX**).
    * **Chống bắt nhầm ảnh rác**: Chỉ kích hoạt khi ảnh chụp màn hình chứa giao diện ứng dụng Re-ID (quét nhanh nhãn định vị `TIME` đa tỷ lệ). Tự động bỏ qua các ảnh copy từ trình duyệt web, Office, tệp tin cũ hoặc ứng dụng chat (Zalo, Messenger...).
-2. **Khớp nhân vật AI cục bộ**:
+2. **OCR Timestamp Matching (MỚI)**:
+   * Đọc thời gian trên ảnh mẫu và ảnh clipboard bằng OCR.
+   * Chỉ vẽ khung khi **CẢ** tỉ lệ ảnh **VÀ** thời gian đều khớp.
+   * Tránh vẽ nhầm khung lên ảnh cùng người nhưng khác thời điểm.
+   * Xem [OCR_SETUP.md](OCR_SETUP.md) để cài đặt và cấu hình.
+3. **Khớp nhân vật AI cục bộ**:
    * Trích xuất đặc trưng (Feature Extraction) và tính toán khoảng cách cosine bằng mô hình AI cục bộ siêu tốc (ONNX/OpenVINO).
    * Hỗ trợ tìm kiếm theo thư mục mẫu (Queries) được phân loại.
 3. **Vẽ khung thông minh (Dynamic Insets)**:

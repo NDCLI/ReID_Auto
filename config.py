@@ -190,3 +190,20 @@ IGNORE_LEFT_RATIO = 0.25
 
 # Ignore matches in the bottom X portion of the screen (e.g. 0.3 for bottom 30%)
 IGNORE_BOTTOM_RATIO = 0.35
+
+# ============================================================
+# OCR TIMESTAMP MATCHING
+# ============================================================
+# Enable OCR-based timestamp verification
+# When enabled, matches are filtered by comparing timestamps extracted from
+# reference images and clipboard screenshots
+ENABLE_OCR_TIMESTAMP_FILTER = True  # Tesseract installed at C:\Program Files\Tesseract-OCR
+
+# Tolerance in seconds for timestamp matching
+# Two timestamps are considered matching if they differ by at most this value
+OCR_TIMESTAMP_TOLERANCE = 5
+
+# OCR method: 'auto', 'tesseract', or 'easyocr'
+# 'auto' tries tesseract first, then falls back to easyocr
+# Note: EasyOCR has PyTorch dependency issues on some systems, use tesseract instead
+OCR_METHOD = 'tesseract'
