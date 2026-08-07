@@ -51,7 +51,7 @@ from ocr_utils import extract_timestamp, extract_reference_timestamp, timestamps
 # ============================================================
 # LOGGING HELPER
 # ============================================================
-def log(tag: str, message: str, color: str | None = None) -> None:
+def log(tag: str, message: str) -> None:
     """Print a timestamped log message."""
     timestamp = datetime.datetime.now().strftime("%H:%M:%S")
     print(f"  [{timestamp}] [{tag}] {message}")
@@ -985,55 +985,6 @@ class TemplateMatcher:
         # before reaching this method), so no post-filter is needed here.
 
         return all_matches
-
-    def _filter_matches_by_timestamp(self, matches: list[dict], screenshot_timestamp: str | None) -> list[dict]:
-        """Filter matches based on timestamp comparison.
-
-        Only keep matches where at least one reference timestamp matches
-        the screenshot timestamp (within tolerance).
-        If timestamps cannot be compared (missing or extraction failed),
-        allow the match.
-        """
-        if not matches:
-            return matches
-
-        if screenshot_timestamp is None:
-            # No screenshot timestamp available, cannot filter by time
-            log("OCR", "No screenshot timestamp detected, skipping timestamp filter")
-            return matches
-
-        filtered_matches = []
-        for match in matches:
-            query_name = match.get('query')
-            ref_timestamps = self.reference_timestamps.get(query_name)
-
-            if not ref_timestamps:
-                # No reference timestamps — can't filter, allow match
-                filtered_matches.append(match)
-                continue
-
-            # Check if screenshot time matches ANY reference time
-            any_match = any(
-                timestamps_match(ref_ts, screenshot_timestamp,
-                                 tolerance_minutes=OCR_TIMESTAMP_TOLERANCE)
-                for ref_ts in ref_timestamps
-            )
-            if any_match:
-                filtered_matches.append(match)
-            else:
-                log(
-                    "OCR",
-                    f"Rejected {query_name}: timestamp mismatch "
-                    f"(refs={ref_timestamps}, screenshot={screenshot_timestamp})"
-                )
-
-        if filtered_matches != matches:
-            log(
-                "OCR",
-                f"Timestamp filter: {len(matches)} -> {len(filtered_matches)} matches"
-            )
-
-        return filtered_matches
 
     def _non_max_suppression(self, matches: list[dict], iou_threshold: float = 0.3) -> list[dict]:
         """Remove overlapping detections, keeping highest score."""

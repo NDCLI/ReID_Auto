@@ -17,7 +17,6 @@ from auto_marker import (
     get_clipboard_image_hash,
     read_image_file,
 )
-from batch_review import BatchReviewWindow, classify_item_query
 from config import APP_MUTEX_NAME, APP_NAME, QUERIES_DIR, OUTPUT_DIR, MATCH_THRESHOLD
 from library_win import LibraryWindow
 from preview_win import PreviewWindow
@@ -272,8 +271,8 @@ class AutoMarkerApp:
         except (tk.TclError, OSError, FileNotFoundError) as e:
             print(f"Không thể nạp icon ứng dụng: {e}")
         # Center the window on screen
-        w = 700
-        h = 700
+        w = 680
+        h = 600
         ws = self.root.winfo_screenwidth()
         hs = self.root.winfo_screenheight()
         x = (ws - w) // 2
@@ -322,41 +321,41 @@ class AutoMarkerApp:
 
         # Main frame
         main_frame = ctk.CTkFrame(self.root, fg_color="transparent")
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=15)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=10)
 
         # TITLE
         lbl_title = ctk.CTkLabel(
-            main_frame, 
+            main_frame,
             text="📸 RE-ID AUTO DRAW",
-            font=("Segoe UI", 18, "bold"), 
+            font=("Segoe UI", 16, "bold"),
             text_color="#3498DB"
         )
-        lbl_title.pack(pady=(0, 15))
+        lbl_title.pack(pady=(0, 8))
 
         # --- SECTION 1: DATA SOURCE ---
         frame_data = ctk.CTkFrame(main_frame, corner_radius=10, border_width=1, border_color="#34495E")
-        frame_data.pack(fill=tk.X, pady=8, padx=2)
+        frame_data.pack(fill=tk.X, pady=5, padx=2)
 
         # Header for Section 1
         lbl_sec1_header = ctk.CTkLabel(
-            frame_data, 
-            text="📁 BƯỚC 1: QUẢN LÝ DỮ LIỆU MẪU", 
-            font=("Segoe UI", 12, "bold"), 
+            frame_data,
+            text="📁 DỮ LIỆU MẪU",
+            font=("Segoe UI", 11, "bold"),
             text_color="#ECF0F1"
         )
-        lbl_sec1_header.pack(anchor=tk.W, padx=15, pady=(10, 5))
+        lbl_sec1_header.pack(anchor=tk.W, padx=15, pady=(8, 3))
 
         # Content container inside frame_data for padding
         content_data = ctk.CTkFrame(frame_data, fg_color="transparent")
-        content_data.pack(fill=tk.X, padx=15, pady=(0, 10))
+        content_data.pack(fill=tk.X, padx=15, pady=(0, 8))
 
         # 1.1 Chọn thư mục dữ liệu
         lbl_queries_title = ctk.CTkLabel(
-            content_data, 
-            text="Thư mục chứa ảnh mẫu (Queries):", 
+            content_data,
+            text="Thư mục ảnh mẫu:",
             font=("Segoe UI", 11)
         )
-        lbl_queries_title.pack(anchor=tk.W, pady=(5, 2))
+        lbl_queries_title.pack(anchor=tk.W, pady=(4, 2))
 
         frame_dir = ctk.CTkFrame(content_data, fg_color="transparent")
         frame_dir.pack(fill=tk.X, pady=2)
@@ -393,7 +392,7 @@ class AutoMarkerApp:
 
         self.switch_auto_query = ctk.CTkSwitch(
             content_data,
-            text="Tự nhận ảnh chụp 1 người từ Clipboard và lưu vào Query",
+            text="Tự lưu ảnh 1 người từ Clipboard vào Query",
             variable=self.auto_query_capture,
             onvalue=True,
             offvalue=False,
@@ -401,7 +400,7 @@ class AutoMarkerApp:
             font=("Segoe UI", 11, "bold"),
             progress_color="#8E44AD",
         )
-        self.switch_auto_query.pack(anchor=tk.W, pady=(9, 0))
+        self.switch_auto_query.pack(anchor=tk.W, pady=(6, 0))
 
         frame_capture_query = ctk.CTkFrame(content_data, fg_color="transparent")
         frame_capture_query.pack(fill=tk.X, pady=(7, 0))
@@ -427,21 +426,21 @@ class AutoMarkerApp:
 
         # --- SECTION 2: AUTO MARKER ---
         frame_marker = ctk.CTkFrame(main_frame, corner_radius=10, border_width=1, border_color="#34495E")
-        frame_marker.pack(fill=tk.X, pady=8, padx=2)
+        frame_marker.pack(fill=tk.X, pady=5, padx=2)
 
         lbl_sec2_header = ctk.CTkLabel(
-            frame_marker, 
-            text="🎯 BƯỚC 2: CÔNG CỤ VẼ KHUNG (SNIPPING TOOL)", 
-            font=("Segoe UI", 12, "bold"), 
+            frame_marker,
+            text="🎯 VẼ KHUNG TỰ ĐỘNG",
+            font=("Segoe UI", 11, "bold"),
             text_color="#ECF0F1"
         )
-        lbl_sec2_header.pack(anchor=tk.W, padx=15, pady=(10, 5))
+        lbl_sec2_header.pack(anchor=tk.W, padx=15, pady=(8, 3))
 
         content_marker = ctk.CTkFrame(frame_marker, fg_color="transparent")
-        content_marker.pack(fill=tk.X, padx=15, pady=(0, 10))
+        content_marker.pack(fill=tk.X, padx=15, pady=(0, 8))
 
         frame_buttons = ctk.CTkFrame(content_marker, fg_color="transparent")
-        frame_buttons.pack(fill=tk.X, pady=5)
+        frame_buttons.pack(fill=tk.X, pady=4)
 
         self.btn_start = ctk.CTkButton(
             frame_buttons, 
@@ -464,47 +463,36 @@ class AutoMarkerApp:
         )
         self.btn_stop.pack(side=tk.LEFT, padx=(8, 0), expand=True, fill=tk.X)
 
-        self.btn_batch = ctk.CTkButton(
-            content_marker,
-            text="BATCH: CHỌN NHIỀU ẢNH & MỞ THƯ VIỆN DUYỆT",
-            font=("Segoe UI", 11, "bold"),
-            command=self.run_batch_dialog,
-            fg_color="#D68910",
-            hover_color="#B9770E",
-            height=32,
-        )
-        self.btn_batch.pack(fill=tk.X, pady=(6, 0))
-
         self.btn_library = ctk.CTkButton(
             content_marker,
-            text="📚 THƯ VIỆN ẢNH ĐÃ LƯU",
+            text="📚 Xem ảnh đã lưu",
             font=("Segoe UI", 11, "bold"),
             command=self.open_library_window,
             fg_color="#5D6D7E",
             hover_color="#48586A",
-            height=32,
+            height=30,
         )
-        self.btn_library.pack(fill=tk.X, pady=(6, 0))
+        self.btn_library.pack(fill=tk.X, pady=(5, 0))
 
         self.lbl_status = ctk.CTkLabel(
-            content_marker, 
-            text="Trạng thái: ĐANG DỪNG 🔴", 
-            text_color="#E74C3C", 
-            font=("Segoe UI", 12, "bold")
+            content_marker,
+            text="Trạng thái: ĐANG DỪNG 🔴",
+            text_color="#E74C3C",
+            font=("Segoe UI", 11, "bold")
         )
-        self.lbl_status.pack(pady=(8, 0))
+        self.lbl_status.pack(pady=(6, 0))
 
         # --- SECTION 3: LOGS ---
         frame_logs = ctk.CTkFrame(main_frame, corner_radius=10, border_width=1, border_color="#34495E")
-        frame_logs.pack(fill=tk.BOTH, expand=True, pady=8, padx=2)
+        frame_logs.pack(fill=tk.BOTH, expand=True, pady=5, padx=2)
 
         lbl_sec3_header = ctk.CTkLabel(
-            frame_logs, 
-            text="📝 NHẬT KÝ HOẠT ĐỘNG (LOGS)", 
-            font=("Segoe UI", 11, "bold"), 
+            frame_logs,
+            text="📝 NHẬT KÝ",
+            font=("Segoe UI", 11, "bold"),
             text_color="#ECF0F1"
         )
-        lbl_sec3_header.pack(anchor=tk.W, padx=15, pady=(8, 4))
+        lbl_sec3_header.pack(anchor=tk.W, padx=15, pady=(6, 3))
 
         content_logs = ctk.CTkFrame(frame_logs, fg_color="transparent")
         content_logs.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 10))
@@ -697,82 +685,6 @@ class AutoMarkerApp:
                 )
             except (OSError, PermissionError, IOError) as e:
                 messagebox.showerror("Lỗi", f"Lỗi khi xóa: {str(e)}")
-
-    def run_batch_dialog(self):
-        paths = filedialog.askopenfilenames(
-            title="Chọn nhiều screenshot để xử lý Batch",
-            filetypes=[("Image Files", "*.png *.jpg *.jpeg *.bmp *.webp")],
-        )
-        if not paths:
-            return
-        if not getattr(self, "matcher", None):
-            messagebox.showwarning(
-                "Chưa nạp Query",
-                "Hãy bật công cụ vẽ khung để nạp dữ liệu Query trước khi chạy Batch.",
-            )
-            return
-
-        self.is_processing = True
-        self.btn_batch.configure(state="disabled", text="ĐANG XỬ LÝ BATCH...")
-        batch_output = os.path.join(
-            OUTPUT_DIR, f"batch_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        )
-
-        def task():
-            items = []
-            try:
-                for index, path in enumerate(paths, start=1):
-                    image = read_image_file(path)
-                    if image is None:
-                        print(f"[BATCH] Bỏ qua file không đọc được: {path}")
-                        continue
-                    matches = self.matcher.find_matches(image, debug=False)
-                    batch_query = classify_item_query(matches)
-                    items.append({
-                        "path": path,
-                        "image": image,
-                        "matches": matches,
-                        "query": batch_query,
-                    })
-                    print(
-                        f"[BATCH] {index}/{len(paths)}: {batch_query} · "
-                        f"{len(matches)} khung - {path}"
-                    )
-
-                if not items:
-                    raise ValueError("Không có ảnh hợp lệ để duyệt.")
-
-                def open_library():
-                    def on_close():
-                        self.active_preview_window = None
-                        self.is_processing = False
-                        self.btn_batch.configure(
-                            state="normal",
-                            text="BATCH: CHỌN NHIỀU ẢNH & MỞ THƯ VIỆN DUYỆT",
-                        )
-
-                    self.active_preview_window = BatchReviewWindow(
-                        self.root, items, batch_output, on_close=on_close
-                    )
-
-                self.root.after(0, open_library)
-            except Exception as exc:
-                import traceback
-                traceback.print_exc()
-                print(f"[BATCH ERROR] {exc}")
-                error_message = str(exc)
-
-                def show_error(error=error_message):
-                    self.is_processing = False
-                    self.btn_batch.configure(
-                        state="normal",
-                        text="BATCH: CHỌN NHIỀU ẢNH & MỞ THƯ VIỆN DUYỆT",
-                    )
-                    messagebox.showerror("Batch thất bại", error)
-
-                self.root.after(0, show_error)
-
-        threading.Thread(target=task, daemon=True).start()
 
     def open_library_window(self):
         existing = getattr(self, "active_preview_window", None)

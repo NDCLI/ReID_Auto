@@ -77,15 +77,6 @@ class TestConfigConstants(unittest.TestCase):
         self.assertIsInstance(config.BOX_THICKNESS, int)
         self.assertGreater(config.BOX_THICKNESS, 0)
 
-    def test_query_colors(self):
-        self.assertIsInstance(config.QUERY_COLORS, list)
-        self.assertGreater(len(config.QUERY_COLORS), 0)
-        for color in config.QUERY_COLORS:
-            self.assertIsInstance(color, tuple)
-            self.assertEqual(len(color), 3)
-            for channel in color:
-                self.assertTrue(0 <= channel <= 255)
-
     def test_poll_interval(self):
         self.assertIsInstance(config.POLL_INTERVAL, float)
         self.assertGreater(config.POLL_INTERVAL, 0)
