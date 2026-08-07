@@ -301,40 +301,6 @@ class TestClipboardToken(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# classify_item_query from batch_review
-# ---------------------------------------------------------------------------
-class TestClassifyItemQuery(unittest.TestCase):
-    """batch_review.classify_item_query picks the dominant query name."""
-
-    def test_empty_matches(self):
-        from batch_review import classify_item_query
-        self.assertEqual(classify_item_query([]), "Chua_xac_dinh")
-
-    def test_single_query(self):
-        from batch_review import classify_item_query
-        matches = [
-            {"query": "Query_1", "score": 0.9},
-            {"query": "Query_1", "score": 0.8},
-        ]
-        self.assertEqual(classify_item_query(matches), "Query_1")
-
-    def test_dominant_by_count(self):
-        from batch_review import classify_item_query
-        matches = [
-            {"query": "Query_1", "score": 0.9},
-            {"query": "Query_2", "score": 0.95},
-            {"query": "Query_1", "score": 0.8},
-        ]
-        # Query_1 has 2 matches, Query_2 has 1
-        self.assertEqual(classify_item_query(matches), "Query_1")
-
-    def test_missing_query_key(self):
-        from batch_review import classify_item_query
-        matches = [{"score": 0.9}]
-        self.assertEqual(classify_item_query(matches), "Chua_xac_dinh")
-
-
-# ---------------------------------------------------------------------------
 # find_matches fast-root fallback — "select all folders" mode
 # ---------------------------------------------------------------------------
 class TestFindMatchesFastRootFallback(unittest.TestCase):

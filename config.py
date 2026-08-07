@@ -144,42 +144,6 @@ BOX_THICKNESS = 2
 # which rejects clicks that land in the gap between cards.
 CLICK_BOX_MIN_SIZE = 20
 
-# Color palette for different queries (BGR format for OpenCV)
-QUERY_COLORS = [
-    (0, 0, 255),      # Red
-    (0, 255, 0),      # Green
-    (255, 0, 0),      # Blue
-    (0, 255, 255),    # Yellow
-    (255, 0, 255),    # Magenta
-    (255, 255, 0),    # Cyan
-    (0, 165, 255),    # Orange
-    (128, 0, 128),    # Purple
-    (0, 128, 255),    # Dark Orange
-    (203, 192, 255),  # Pink
-    (0, 215, 255),    # Gold
-    (180, 105, 255),  # Hot Pink
-    (144, 238, 144),  # Light Green
-    (42, 42, 165),    # Brown
-]
-
-
-def get_query_color(index):
-    """Return a BGR color for the given 0-based query index.
-
-    Falls back to generating distinct colors via HSV spacing when the
-    index exceeds the predefined palette.
-    """
-    if index < len(QUERY_COLORS):
-        return QUERY_COLORS[index]
-    # Generate a visually distinct color using golden-angle HSV spacing
-    import colorsys
-    golden = 0.618033988749895
-    hue = ((index - len(QUERY_COLORS)) * golden) % 1.0
-    saturation = 0.7 + (index % 3) * 0.1   # vary saturation slightly
-    value = 0.85 + (index % 2) * 0.10       # vary brightness slightly
-    r, g, b = colorsys.hsv_to_rgb(hue, saturation, value)
-    return (int(b * 255), int(g * 255), int(r * 255))  # BGR
-
 # ============================================================
 # CLIPBOARD MONITORING
 # ============================================================

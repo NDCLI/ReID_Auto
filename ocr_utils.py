@@ -20,7 +20,6 @@ import os
 import re
 import cv2
 import numpy as np
-from datetime import datetime
 from typing import Optional, Tuple
 
 # Auto-configure Tesseract path on Windows
