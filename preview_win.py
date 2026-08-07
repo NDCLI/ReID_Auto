@@ -6,7 +6,8 @@ import cv2
 import time
 from auto_marker import (
     draw_match_boxes,
-    save_result,
+    save_result_with_metadata,
+    get_dominant_query_name,
     copy_image_to_clipboard,
     notify_sound,
     toggle_box_at_point,
@@ -206,16 +207,27 @@ class PreviewWindow(ctk.CTkToplevel):
     def save_and_copy(self):
         # Restore matcher threshold
         self.matcher.threshold = self.original_threshold
-        
+
         marked_bgr = draw_match_boxes(self.current_bgr.copy(), self.matches)
-        filepath = save_result(marked_bgr, self.output_dir)
+
+        # Determine query subfolder from dominant query in matches
+        query_name = get_dominant_query_name(self.matches)
+
+        # Save with metadata (original + JSON sidecar + marked image)
+        filepath = save_result_with_metadata(
+            marked_bgr,
+            self.current_bgr,
+            self.matches,
+            self.output_dir,
+            query_name=query_name,
+        )
         print(f"[{time.strftime('%H:%M:%S')}] [SAVE] Saved: {filepath}")
-        
+
         marked_pil = Image.fromarray(cv2.cvtColor(marked_bgr, cv2.COLOR_BGR2RGB))
         copy_image_to_clipboard(marked_pil)
-        
+
         # Tell the background thread to ignore the clipboard change we just caused
         self.matcher.ignore_next_clipboard = True
-        
+
         notify_sound(success=True)
         self.destroy()

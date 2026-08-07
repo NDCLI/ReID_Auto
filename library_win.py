@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import os
+import json
 import tkinter as tk
 from tkinter import messagebox
 
 import customtkinter as ctk
 from PIL import Image, ImageTk
 
-from auto_marker import copy_image_to_clipboard, read_image_file
+from auto_marker import (
+    copy_image_to_clipboard,
+    read_image_file,
+    draw_match_boxes,
+    toggle_box_at_point,
+    load_metadata,
+    update_metadata,
+)
 import cv2
 
 VALID_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff")
@@ -58,22 +66,24 @@ def send_to_recycle_bin(path):
 def collect_saved_images(output_dir):
     """Return saved result images under output_dir, newest first.
 
-    Single previews save directly into output_dir; batch runs save into
-    per-query subfolders. Both are gathered here.
+    Skips original_*.png sidecar files (used internally for box editing).
     """
     entries = []
     if not os.path.isdir(output_dir):
         return entries
     for root_dir, _dirs, files in os.walk(output_dir):
         for name in files:
-            if name.lower().endswith(VALID_EXTS):
-                full = os.path.join(root_dir, name)
-                try:
-                    mtime = os.path.getmtime(full)
-                except OSError:
-                    mtime = 0.0
-                rel = os.path.relpath(full, output_dir)
-                entries.append({"path": full, "rel": rel, "mtime": mtime})
+            if not name.lower().endswith(VALID_EXTS):
+                continue
+            if name.lower().startswith("original_"):
+                continue  # sidecar original image, not user-facing
+            full = os.path.join(root_dir, name)
+            try:
+                mtime = os.path.getmtime(full)
+            except OSError:
+                mtime = 0.0
+            rel = os.path.relpath(full, output_dir)
+            entries.append({"path": full, "rel": rel, "mtime": mtime})
     entries.sort(key=lambda item: item["mtime"], reverse=True)
     return entries
 
@@ -90,6 +100,12 @@ class LibraryWindow(ctk.CTkToplevel):
         self.current_index = 0
         self.photo = None
         self._library_icon = None
+
+        # Edit state — loaded from JSON sidecar when available
+        self._edit_original_bgr = None   # clean image for toggle logic
+        self._edit_matches = None        # mutable matches list
+        self._edit_dirty = False         # True when matches were modified
+        self._display_scale = 1.0       # canvas-to-image scale factor
 
         os.makedirs(output_dir, exist_ok=True)
         self._setup_icon()
@@ -156,6 +172,7 @@ class LibraryWindow(ctk.CTkToplevel):
         viewer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8), pady=8)
         self.canvas = tk.Canvas(viewer, bg="#1E272C", highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.canvas.bind("<ButtonPress-1>", self._on_canvas_click)
 
         controls = ctk.CTkFrame(self, fg_color="transparent")
         controls.pack(fill=tk.X, padx=14, pady=(4, 12))
@@ -233,20 +250,40 @@ class LibraryWindow(ctk.CTkToplevel):
             self._show_current()
 
     def _show_current(self):
+        # Save any pending edits before switching to a different image
+        self._flush_edits()
+
         if not self.items:
             self.current_label.configure(text="Chưa có ảnh nào trong thư viện.")
             self.canvas.delete("all")
             self.photo = None
+            self._edit_original_bgr = None
+            self._edit_matches = None
+            self._edit_dirty = False
             return
         self.current_index = max(0, min(self.current_index, len(self.items) - 1))
         self.listbox.selection_clear(0, tk.END)
         self.listbox.selection_set(self.current_index)
         self.listbox.see(self.current_index)
         item = self.items[self.current_index]
+
+        # Try to load metadata for edit capability
+        meta = load_metadata(item["path"])
+        if meta:
+            self._edit_original_bgr = read_image_file(meta["original_path"])
+            self._edit_matches = meta["matches"]
+            self._edit_dirty = False
+        else:
+            self._edit_original_bgr = None
+            self._edit_matches = None
+            self._edit_dirty = False
+
+        editable = self._edit_original_bgr is not None
+        edit_hint = " · Click thêm/xóa khung" if editable else ""
         self.current_label.configure(
             text=(
                 f"{self.current_index + 1}/{len(self.items)} · "
-                f"{item['rel']} · ←/→ chuyển ảnh"
+                f"{item['rel']} · ←/→ chuyển ảnh{edit_hint}"
             )
         )
         self._draw_current()
@@ -255,7 +292,13 @@ class LibraryWindow(ctk.CTkToplevel):
         if not self.items or not self.canvas.winfo_exists():
             return
         item = self.items[self.current_index]
-        image = read_image_file(item["path"])
+
+        # If editable, re-draw from original + matches (reflects toggled boxes)
+        if self._edit_original_bgr is not None and self._edit_matches is not None:
+            image = draw_match_boxes(self._edit_original_bgr.copy(), self._edit_matches)
+        else:
+            image = read_image_file(item["path"])
+
         if image is None:
             self.canvas.delete("all")
             self.photo = None
@@ -266,10 +309,10 @@ class LibraryWindow(ctk.CTkToplevel):
         self.update_idletasks()
         canvas_w = max(10, self.canvas.winfo_width())
         canvas_h = max(10, self.canvas.winfo_height())
-        scale = min(canvas_w / pil_image.width, canvas_h / pil_image.height)
+        self._display_scale = min(canvas_w / pil_image.width, canvas_h / pil_image.height)
         new_size = (
-            max(1, int(pil_image.width * scale)),
-            max(1, int(pil_image.height * scale)),
+            max(1, int(pil_image.width * self._display_scale)),
+            max(1, int(pil_image.height * self._display_scale)),
         )
         pil_image = pil_image.resize(new_size, Image.Resampling.LANCZOS)
         self.photo = ImageTk.PhotoImage(pil_image)
@@ -292,7 +335,13 @@ class LibraryWindow(ctk.CTkToplevel):
         if not self.items:
             return "break"
         item = self.items[self.current_index]
-        image = read_image_file(item["path"])
+
+        # Use live edited version if available
+        if self._edit_original_bgr is not None and self._edit_matches is not None:
+            image = draw_match_boxes(self._edit_original_bgr.copy(), self._edit_matches)
+        else:
+            image = read_image_file(item["path"])
+
         if image is None:
             messagebox.showerror("Lỗi", f"Không đọc được ảnh: {item['rel']}")
             return "break"
@@ -310,12 +359,38 @@ class LibraryWindow(ctk.CTkToplevel):
     def delete_current(self):
         if not self.items:
             return
+        self._edit_dirty = False  # Don't flush — we're deleting
         item = self.items[self.current_index]
+
+        # Determine sidecar file paths before deletion
+        base, _ = os.path.splitext(item["path"])
+        sidecar_json = base + ".json"
+        sidecar_original = None
+        if os.path.isfile(sidecar_json):
+            try:
+                with open(sidecar_json, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                orig_file = data.get("original_file", "")
+                if orig_file:
+                    sidecar_original = os.path.join(
+                        os.path.dirname(item["path"]), orig_file
+                    )
+            except Exception:
+                pass
+
         try:
             send_to_recycle_bin(item["path"])
+            if os.path.isfile(sidecar_json):
+                send_to_recycle_bin(sidecar_json)
+            if sidecar_original and os.path.isfile(sidecar_original):
+                send_to_recycle_bin(sidecar_original)
         except OSError as exc:
             messagebox.showerror("Lỗi", f"Không thể xóa: {exc}")
             return
+
+        self._edit_original_bgr = None
+        self._edit_matches = None
+
         del self.items[self.current_index]
         self._refresh_list()
         if self.current_index >= len(self.items):
@@ -323,6 +398,68 @@ class LibraryWindow(ctk.CTkToplevel):
         self._show_current()
 
     def close(self):
+        self._flush_edits()
         if self.on_close_callback:
             self.on_close_callback()
         self.destroy()
+
+    # ------------------------------------------------------------------
+    # Click-to-toggle box editing (requires JSON sidecar + original image)
+    # ------------------------------------------------------------------
+
+    def _on_canvas_click(self, event):
+        """Toggle a box at the click location (if metadata is available)."""
+        if self._edit_original_bgr is None or self._edit_matches is None:
+            return  # not editable (legacy image without sidecar)
+        if not self.photo:
+            return
+
+        # Translate canvas pixel → real image pixel
+        canvas_w = self.canvas.winfo_width()
+        canvas_h = self.canvas.winfo_height()
+        photo_w = self.photo.width()
+        photo_h = self.photo.height()
+
+        offset_x = (canvas_w - photo_w) // 2
+        offset_y = (canvas_h - photo_h) // 2
+
+        x_in_photo = event.x - offset_x
+        y_in_photo = event.y - offset_y
+
+        if not (0 <= x_in_photo < photo_w and 0 <= y_in_photo < photo_h):
+            return
+
+        real_x = x_in_photo / self._display_scale
+        real_y = y_in_photo / self._display_scale
+
+        default_query = (
+            self._edit_matches[0]["query"] if self._edit_matches else "Query_Mac_Dinh"
+        )
+        if toggle_box_at_point(
+            self._edit_original_bgr, self._edit_matches, real_x, real_y, default_query
+        ):
+            self._edit_dirty = True
+            self._draw_current()
+
+    def _flush_edits(self):
+        """Re-save the marked image and update JSON when boxes were toggled."""
+        if not self._edit_dirty:
+            return
+        if self._edit_matches is None or self._edit_original_bgr is None:
+            return
+        if not self.items or not (0 <= self.current_index < len(self.items)):
+            return
+
+        item = self.items[self.current_index]
+        filepath = item["path"]
+
+        # Re-draw marked image from clean original + current matches
+        marked_bgr = draw_match_boxes(self._edit_original_bgr.copy(), self._edit_matches)
+
+        # Overwrite the marked PNG
+        cv2.imwrite(filepath, marked_bgr)
+
+        # Update the JSON sidecar
+        update_metadata(filepath, self._edit_matches)
+
+        self._edit_dirty = False

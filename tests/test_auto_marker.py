@@ -272,7 +272,7 @@ class TestLogFunction(unittest.TestCase):
     def test_log_does_not_raise(self):
         # Just verify it doesn't crash
         auto_marker.log("TEST", "hello world")
-        auto_marker.log("WARN", "some warning", color="yellow")
+        auto_marker.log("WARN", "some warning")
 
 
 # ---------------------------------------------------------------------------

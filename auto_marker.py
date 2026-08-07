@@ -22,6 +22,7 @@ import time
 import hashlib
 import datetime
 import io
+import json
 import ctypes
 import argparse
 import numpy as np
@@ -89,6 +90,29 @@ def dominant_query_only(all_matches: list[dict]) -> list[dict]:
         key=lambda q: (query_counts[q], query_scores[q]),
     )
     return [m for m in all_matches if m["query"] == dominant_query]
+
+
+def get_dominant_query_name(matches: list[dict]) -> str | None:
+    """Return the query name with the most matches, or None if empty.
+
+    Used to determine the subfolder when saving results by query.
+    """
+    if not matches:
+        return None
+    query_counts: dict[str, int] = {}
+    query_scores: dict[str, float] = {}
+    for m in matches:
+        q = m.get("query", "")
+        if not q:
+            continue
+        query_counts[q] = query_counts.get(q, 0) + 1
+        query_scores[q] = query_scores.get(q, 0) + m.get("score", 0.0)
+    if not query_counts:
+        return None
+    return max(
+        query_counts.keys(),
+        key=lambda q: (query_counts[q], query_scores[q]),
+    )
 
 
 def write_image_file(path: str, image: np.ndarray) -> bool:
@@ -1453,6 +1477,110 @@ def save_result(marked_bgr: np.ndarray, output_dir: str) -> str:
     filepath = os.path.join(output_dir, filename)
     cv2.imwrite(filepath, marked_bgr)
     return filepath
+
+
+def _serialize_matches(matches: list[dict]) -> list[dict]:
+    """Convert match dicts to JSON-safe format (tuples→lists, numpy→float)."""
+    result = []
+    for m in matches:
+        entry = {}
+        for k, v in m.items():
+            if k == "bbox":
+                entry[k] = list(v)
+            elif isinstance(v, (np.floating, np.integer)):
+                entry[k] = float(v)
+            elif isinstance(v, dict):
+                entry[k] = {
+                    sk: float(sv) if isinstance(sv, (np.floating, np.integer)) else sv
+                    for sk, sv in v.items()
+                }
+            else:
+                entry[k] = v
+        result.append(entry)
+    return result
+
+
+def save_result_with_metadata(
+    marked_bgr: np.ndarray,
+    original_bgr: np.ndarray,
+    matches: list[dict],
+    output_dir: str,
+    query_name: str | None = None,
+) -> str:
+    """Save marked image + original image + JSON sidecar to output directory.
+
+    When query_name is provided, files are saved under output_dir/<query_name>/.
+    Returns the filepath of the marked image.
+    """
+    target_dir = os.path.join(output_dir, query_name) if query_name else output_dir
+    os.makedirs(target_dir, exist_ok=True)
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    marked_filename = f"marked_{timestamp}.png"
+    marked_filepath = os.path.join(target_dir, marked_filename)
+    cv2.imwrite(marked_filepath, marked_bgr)
+
+    original_filename = f"original_{timestamp}.png"
+    original_filepath = os.path.join(target_dir, original_filename)
+    cv2.imwrite(original_filepath, original_bgr)
+
+    json_filename = f"marked_{timestamp}.json"
+    json_filepath = os.path.join(target_dir, json_filename)
+    with open(json_filepath, "w", encoding="utf-8") as f:
+        json.dump({
+            "matches": _serialize_matches(matches),
+            "marked_file": marked_filename,
+            "original_file": original_filename,
+            "timestamp": timestamp,
+        }, f, ensure_ascii=False, indent=2)
+
+    return marked_filepath
+
+
+def load_metadata(marked_filepath: str) -> dict | None:
+    """Load the JSON sidecar for a marked image.
+
+    Returns {"original_path": str, "matches": list[dict]} or None if missing.
+    """
+    base, _ = os.path.splitext(marked_filepath)
+    json_path = base + ".json"
+    if not os.path.isfile(json_path):
+        return None
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    directory = os.path.dirname(marked_filepath)
+    original_file = data.get("original_file", "")
+    original_path = os.path.join(directory, original_file)
+    if not os.path.isfile(original_path):
+        return None
+
+    matches = data.get("matches", [])
+    for m in matches:
+        if "bbox" in m and isinstance(m["bbox"], list):
+            m["bbox"] = tuple(m["bbox"])
+
+    return {"original_path": original_path, "matches": matches}
+
+
+def update_metadata(marked_filepath: str, matches: list[dict]) -> None:
+    """Update the matches in an existing JSON sidecar."""
+    base, _ = os.path.splitext(marked_filepath)
+    json_path = base + ".json"
+    if not os.path.isfile(json_path):
+        return
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return
+    data["matches"] = _serialize_matches(matches)
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 # ============================================================
