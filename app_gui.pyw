@@ -5,7 +5,7 @@ import sys
 import datetime
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 import queue
 import customtkinter as ctk
 import pystray
@@ -271,14 +271,15 @@ class AutoMarkerApp:
         except (tk.TclError, OSError, FileNotFoundError) as e:
             print(f"Không thể nạp icon ứng dụng: {e}")
         # Center the window on screen
-        w = 680
-        h = 600
+        w = 700
+        h = 560
         ws = self.root.winfo_screenwidth()
         hs = self.root.winfo_screenheight()
         x = (ws - w) // 2
         y = (hs - h) // 2
         self.root.geometry(f"{w}x{h}+{x}+{y}")
-        self.root.resizable(False, False)
+        self.root.resizable(True, True)
+        self.root.minsize(620, 420)
         
         # Monitoring and Log state
         self.is_monitoring = False
@@ -291,7 +292,7 @@ class AutoMarkerApp:
         self.osd_window = None
         self.osd_timer = None
         self.query_collector = None
-        self.auto_query_capture_enabled = True
+        self.auto_query_capture_enabled = True  # luôn bật, không có nút tắt
         self.auto_query_capture = tk.BooleanVar(value=True)
         self.capture_query_target = "Query_1"
         
@@ -319,222 +320,308 @@ class AutoMarkerApp:
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
-        # Main frame
-        main_frame = ctk.CTkFrame(self.root, fg_color="transparent")
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=10)
+        # Header bar (title + status dot)
+        header = ctk.CTkFrame(self.root, fg_color="transparent")
+        header.pack(fill=tk.X, padx=14, pady=(12, 6))
 
-        # TITLE
         lbl_title = ctk.CTkLabel(
-            main_frame,
+            header,
             text="📸 RE-ID AUTO DRAW",
-            font=("Segoe UI", 16, "bold"),
-            text_color="#3498DB"
+            font=("Segoe UI", 15, "bold"),
+            text_color="#3498DB",
         )
-        lbl_title.pack(pady=(0, 8))
+        lbl_title.pack(side=tk.LEFT)
 
-        # --- SECTION 1: DATA SOURCE ---
-        frame_data = ctk.CTkFrame(main_frame, corner_radius=10, border_width=1, border_color="#34495E")
-        frame_data.pack(fill=tk.X, pady=5, padx=2)
-
-        # Header for Section 1
-        lbl_sec1_header = ctk.CTkLabel(
-            frame_data,
-            text="📁 DỮ LIỆU MẪU",
+        self.lbl_status = ctk.CTkLabel(
+            header,
+            text="● ĐANG DỪNG",
+            text_color="#E74C3C",
             font=("Segoe UI", 11, "bold"),
-            text_color="#ECF0F1"
         )
-        lbl_sec1_header.pack(anchor=tk.W, padx=15, pady=(8, 3))
+        self.lbl_status.pack(side=tk.RIGHT)
 
-        # Content container inside frame_data for padding
-        content_data = ctk.CTkFrame(frame_data, fg_color="transparent")
-        content_data.pack(fill=tk.X, padx=15, pady=(0, 8))
+        # Body: sidebar (left) + content (right)
+        body = ctk.CTkFrame(self.root, fg_color="transparent")
+        body.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 12))
 
-        # 1.1 Chọn thư mục dữ liệu
-        lbl_queries_title = ctk.CTkLabel(
-            content_data,
-            text="Thư mục ảnh mẫu:",
-            font=("Segoe UI", 11)
+        # -------- SIDEBAR (left) --------
+        sidebar = ctk.CTkFrame(body, width=205, corner_radius=10, border_width=1, border_color="#34495E")
+        sidebar.pack(side=tk.LEFT, fill=tk.Y)
+        sidebar.pack_propagate(False)
+
+        lbl_side_folder = ctk.CTkLabel(
+            sidebar,
+            text="📁 THƯ MỤC MẪU",
+            font=("Segoe UI", 10, "bold"),
+            text_color="#ECF0F1",
         )
-        lbl_queries_title.pack(anchor=tk.W, pady=(4, 2))
+        lbl_side_folder.pack(anchor=tk.W, padx=12, pady=(12, 6))
 
-        frame_dir = ctk.CTkFrame(content_data, fg_color="transparent")
-        frame_dir.pack(fill=tk.X, pady=2)
-        
-        self.cmb_queries = ctk.CTkComboBox(
-            frame_dir, 
-            width=360, 
-            state="readonly", 
-            command=self.on_query_selected
+        # The folder tree below is the primary picker. The OptionMenu is kept
+        # unpacked only because the hotkey/tray code paths still call `.set()`
+        # on a widget tagged `cmb_queries` to stay in sync.
+        self.cmb_queries = ctk.CTkOptionMenu(
+            sidebar,
+            width=180,
+            height=30,
+            dynamic_resizing=False,
+            command=self.on_query_selected,
         )
-        self.cmb_queries.pack(side=tk.LEFT, padx=(0, 8))
-        
-        self.update_queries_dropdown()
-        
-        btn_refresh_dir = ctk.CTkButton(
-            frame_dir, 
-            text="🔄 Làm Mới", 
-            width=90,
+
+        # Plain tk.Canvas + ttk.Scrollbar instead of CTkScrollableFrame. CTk
+        # widgets redraw their canvas on every <Configure> (window resize), so a
+        # tree holding many CTkButton items makes dragging the window laggy.
+        # Native tk items have no canvas redraw cost on resize.
+        tree_wrap = tk.Frame(sidebar, bg="#2C3C50", bd=0, highlightthickness=0)
+        tree_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        self.folder_tree = tk.Canvas(
+            tree_wrap, bg="#2C3E50", bd=0, highlightthickness=0
+        )
+        tree_sb = ttk.Scrollbar(
+            tree_wrap, orient="vertical", command=self.folder_tree.yview
+        )
+        self.folder_tree.configure(yscrollcommand=tree_sb.set)
+        tree_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.folder_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._tree_inner = tk.Frame(self.folder_tree, bg="#2C3E50")
+        self._tree_window = self.folder_tree.create_window(
+            (0, 0), window=self._tree_inner, anchor="nw"
+        )
+        self._tree_inner.bind(
+            "<Configure>",
+            lambda e: self.folder_tree.configure(
+                scrollregion=self.folder_tree.bbox("all")
+            ),
+        )
+        self.folder_tree.bind(
+            "<Configure>",
+            lambda e: self.folder_tree.itemconfigure(self._tree_window, width=e.width),
+        )
+
+        # -------- CONTENT (right) --------
+        content = ctk.CTkFrame(body, fg_color="transparent")
+        content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(12, 0))
+
+        # Toolbar (top of content)
+        toolbar = ctk.CTkFrame(content, fg_color="transparent")
+        toolbar.pack(fill=tk.X, pady=(0, 6))
+
+        ctk.CTkButton(
+            toolbar,
+            text="🔄 Làm Mới",
+            width=86,
+            height=26,
             command=self.update_queries_dropdown,
             fg_color="#34495E",
-            hover_color="#2C3E50"
-        )
-        btn_refresh_dir.pack(side=tk.LEFT, padx=3)
+            hover_color="#2C3E50",
+        ).pack(side=tk.LEFT, padx=(0, 6))
 
-        btn_clear_dir = ctk.CTkButton(
-            frame_dir, 
-            text="🗑 XÓA DỮ LIỆU", 
-            width=110,
+        ctk.CTkButton(
+            toolbar,
+            text="🗑 Xóa dữ liệu",
+            width=96,
+            height=26,
             command=self.clear_data,
             fg_color="#E74C3C",
-            hover_color="#C0392B"
-        )
-        btn_clear_dir.pack(side=tk.LEFT, padx=3)
+            hover_color="#C0392B",
+        ).pack(side=tk.LEFT, padx=(0, 6))
 
-        self.switch_auto_query = ctk.CTkSwitch(
-            content_data,
-            text="Tự lưu ảnh 1 người từ Clipboard vào Query",
-            variable=self.auto_query_capture,
-            onvalue=True,
-            offvalue=False,
-            command=self.on_auto_query_toggle,
-            font=("Segoe UI", 11, "bold"),
-            progress_color="#8E44AD",
-        )
-        self.switch_auto_query.pack(anchor=tk.W, pady=(6, 0))
-
-        frame_capture_query = ctk.CTkFrame(content_data, fg_color="transparent")
-        frame_capture_query.pack(fill=tk.X, pady=(7, 0))
-
-        self.cmb_capture_query = ctk.CTkComboBox(
-            frame_capture_query,
-            width=360,
-            state="readonly",
-            command=self.on_capture_query_selected,
-        )
-        self.cmb_capture_query.pack(side=tk.LEFT, padx=(0, 8))
-
-        self.btn_next_capture_query = ctk.CTkButton(
-            frame_capture_query,
-            text="Query trống (Space)",
-            width=150,
-            command=self.select_next_empty_capture_query,
-            fg_color="#8E44AD",
-            hover_color="#71368A",
-        )
-        self.btn_next_capture_query.pack(side=tk.LEFT)
-        self.update_capture_query_dropdown()
-
-        # --- SECTION 2: AUTO MARKER ---
-        frame_marker = ctk.CTkFrame(main_frame, corner_radius=10, border_width=1, border_color="#34495E")
-        frame_marker.pack(fill=tk.X, pady=5, padx=2)
-
-        lbl_sec2_header = ctk.CTkLabel(
-            frame_marker,
-            text="🎯 VẼ KHUNG TỰ ĐỘNG",
-            font=("Segoe UI", 11, "bold"),
-            text_color="#ECF0F1"
-        )
-        lbl_sec2_header.pack(anchor=tk.W, padx=15, pady=(8, 3))
-
-        content_marker = ctk.CTkFrame(frame_marker, fg_color="transparent")
-        content_marker.pack(fill=tk.X, padx=15, pady=(0, 8))
-
-        frame_buttons = ctk.CTkFrame(content_marker, fg_color="transparent")
-        frame_buttons.pack(fill=tk.X, pady=4)
-
-        self.btn_start = ctk.CTkButton(
-            frame_buttons, 
-            text="▶ BẬT (START)", 
-            font=("Segoe UI", 11, "bold"),
-            command=self.start_marker,
-            fg_color="#2ECC71",
-            hover_color="#27AE60"
-        )
-        self.btn_start.pack(side=tk.LEFT, padx=(0, 8), expand=True, fill=tk.X)
-
-        self.btn_stop = ctk.CTkButton(
-            frame_buttons, 
-            text="⏹ TẮT (STOP)", 
-            font=("Segoe UI", 11, "bold"),
-            state="disabled", 
-            command=self.stop_marker,
-            fg_color="#E74C3C",
-            hover_color="#C0392B"
-        )
-        self.btn_stop.pack(side=tk.LEFT, padx=(8, 0), expand=True, fill=tk.X)
-
-        self.btn_library = ctk.CTkButton(
-            content_marker,
+        ctk.CTkButton(
+            toolbar,
             text="📚 Xem ảnh đã lưu",
-            font=("Segoe UI", 11, "bold"),
+            width=106,
+            height=26,
             command=self.open_library_window,
             fg_color="#5D6D7E",
             hover_color="#48586A",
-            height=30,
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side=tk.LEFT)
+
+        self.txt_logs = tk.Text(
+            content,
+            bg="#1E272C",
+            fg="#ECF0F1",
+            insertbackground="#ECF0F1",
+            font=("Consolas", 10),
+            relief="flat",
+            bd=0,
+            padx=6,
+            pady=4,
+            wrap="word",
         )
-        self.btn_library.pack(fill=tk.X, pady=(5, 0))
+        self.txt_logs.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
-        self.lbl_status = ctk.CTkLabel(
-            content_marker,
-            text="Trạng thái: ĐANG DỪNG 🔴",
-            text_color="#E74C3C",
-            font=("Segoe UI", 11, "bold")
+        # Control bar (bottom of content) — single row: BẬT/TẮT + query picker
+        controls = ctk.CTkFrame(content, fg_color="transparent")
+        controls.pack(fill=tk.X)
+
+        self.btn_start = ctk.CTkButton(
+            controls,
+            text="▶ BẬT",
+            font=("Segoe UI", 10, "bold"),
+            height=26,
+            width=58,
+            command=self.start_marker,
+            fg_color="#2ECC71",
+            hover_color="#27AE60",
         )
-        self.lbl_status.pack(pady=(6, 0))
+        self.btn_start.pack(side=tk.LEFT, padx=(0, 4))
 
-        # --- SECTION 3: LOGS ---
-        frame_logs = ctk.CTkFrame(main_frame, corner_radius=10, border_width=1, border_color="#34495E")
-        frame_logs.pack(fill=tk.BOTH, expand=True, pady=5, padx=2)
-
-        lbl_sec3_header = ctk.CTkLabel(
-            frame_logs,
-            text="📝 NHẬT KÝ",
-            font=("Segoe UI", 11, "bold"),
-            text_color="#ECF0F1"
+        self.btn_stop = ctk.CTkButton(
+            controls,
+            text="⏹ TẮT",
+            font=("Segoe UI", 10, "bold"),
+            height=26,
+            width=58,
+            state="disabled",
+            command=self.stop_marker,
+            fg_color="#E74C3C",
+            hover_color="#C0392B",
         )
-        lbl_sec3_header.pack(anchor=tk.W, padx=15, pady=(6, 3))
+        self.btn_stop.pack(side=tk.LEFT, padx=(0, 8))
 
-        content_logs = ctk.CTkFrame(frame_logs, fg_color="transparent")
-        content_logs.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 10))
-
-        self.txt_logs = ctk.CTkTextbox(
-            content_logs, 
-            font=("Consolas", 11), 
-            fg_color="#1E272C", 
-            text_color="#ECF0F1"
+        self.cmb_capture_query = ctk.CTkOptionMenu(
+            controls,
+            width=130,
+            height=26,
+            dynamic_resizing=False,
+            command=self.on_capture_query_selected,
         )
-        self.txt_logs.pack(fill=tk.BOTH, expand=True)
+        self.cmb_capture_query.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.btn_next_capture_query = ctk.CTkButton(
+            controls,
+            text="Query trống",
+            height=26,
+            width=100,
+            command=self.select_next_empty_capture_query,
+            fg_color="#8E44AD",
+            hover_color="#71368A",
+            font=("Segoe UI", 10),
+        )
+        self.btn_next_capture_query.pack(side=tk.LEFT)
+
+        self.update_queries_dropdown()
+        self.update_capture_query_dropdown()
 
         # Redirect stdout and stderr
         sys.stdout = RedirectStdout(self.txt_logs, self.log_queue)
         sys.stderr = sys.stdout
         print("Sẵn sàng!")
 
+        # Debounce resize: CTk redraws every canvas on each <Configure> event.
+        # Coalescing rapid resize events into one deferred call cuts CPU usage
+        # during window dragging and eliminates the stutter.
+        self._resize_job = None
+
+        def _on_root_configure(event):
+            if event.widget is not self.root:
+                return
+            if self._resize_job is not None:
+                self.root.after_cancel(self._resize_job)
+            self._resize_job = self.root.after(80, self.root.update_idletasks)
+
+        self.root.bind("<Configure>", _on_root_configure, add="+")
+
     def update_queries_dropdown(self):
         """Update the dropdown with subfolders in queries directory."""
         if not os.path.exists(QUERIES_DIR):
             os.makedirs(QUERIES_DIR, exist_ok=True)
-            
+
         folders = [d for d in os.listdir(QUERIES_DIR) if os.path.isdir(os.path.join(QUERIES_DIR, d))]
-        
+
         import re
         def natural_sort_key(s):
             return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
         folders.sort(key=natural_sort_key)
-        
-        folders.insert(0, "Tất cả (Root queries folder)")
-        
-        self.cmb_queries.configure(values=folders)
-        
+
+        all_options = ["Tất cả (Root queries folder)"] + folders
+        self.cmb_queries.configure(values=all_options)
+
         # Determine current selection index
         current_name = os.path.basename(self.current_queries_dir)
-        if current_name in folders:
+        if current_name in all_options:
             self.cmb_queries.set(current_name)
         else:
-            self.cmb_queries.set(folders[0])
+            self.cmb_queries.set(all_options[0])
+
+        # Rebuild the clickable folder tree in the sidebar.
+        self.rebuild_folder_tree(folders)
 
         if hasattr(self, "cmb_capture_query"):
             self.update_capture_query_dropdown()
+
+    def rebuild_folder_tree(self, folders):
+        """Rebuild the sidebar folder list. Clicking an item selects that folder.
+
+        Plain tk.Label items: native widgets have no per-resize canvas redraw,
+        which keeps window resizing smooth even with many folders.
+        """
+        tree = getattr(self, "folder_tree", None)
+        if tree is None:
+            return
+        for widget in self._tree_inner.winfo_children():
+            widget.destroy()
+
+        active = os.path.basename(self.current_queries_dir)
+        root_selected = self.current_queries_dir == QUERIES_DIR
+        hover_bg = "#2C3C50"
+        normal_bg = "#2C3E50"
+        selected_bg = "#1E272C"
+        normal_fg = "#BDC3C7"
+        selected_fg = "#3498DB"
+
+        def make_item(text, selected, command):
+            label = tk.Label(
+                self._tree_inner,
+                text=text,
+                anchor="w",
+                font=("Segoe UI", 10),
+                bg=selected_bg if selected else normal_bg,
+                fg=selected_fg if selected else normal_fg,
+                padx=8,
+                pady=2,
+                cursor="hand2",
+            )
+            label.pack(fill=tk.X)
+            label.bind("<Button-1>", lambda e: command())
+            label.bind(
+                "<Enter>",
+                lambda e, bg=label.cget("bg"): label.configure(
+                    bg=hover_bg, fg=selected_fg if selected else "#ECF0F1"
+                ),
+            )
+            label.bind(
+                "<Leave>",
+                lambda e: label.configure(
+                    bg=selected_bg if selected else normal_bg,
+                    fg=selected_fg if selected else normal_fg,
+                ),
+            )
+            return label
+
+        make_item(
+            "● Tất cả (Root)",
+            root_selected,
+            lambda: self.select_folder_from_sidebar(QUERIES_DIR),
+        )
+        for folder in folders:
+            selected = not root_selected and folder == active
+            make_item(
+                folder,
+                selected,
+                lambda f=folder: self.select_folder_from_sidebar(
+                    os.path.join(QUERIES_DIR, f)
+                ),
+            )
+
+    def select_folder_from_sidebar(self, path):
+        """Sidebar tree click → set OptionMenu text + apply selection."""
+        self.current_queries_dir = path
+        self.on_query_selected(os.path.basename(path) if path != QUERIES_DIR else "Tất cả (Root queries folder)")
+        self.update_queries_dropdown()
 
     def update_capture_query_dropdown(self):
         """Refresh the independent destination used for clipboard Query captures."""
@@ -726,7 +813,7 @@ class AutoMarkerApp:
         self.is_monitoring = True
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
-        self.lbl_status.configure(text="Trạng thái: ĐANG CHẠY 🟢", text_color="#2ECC71")
+        self.lbl_status.configure(text="● ĐANG CHẠY", text_color="#2ECC71")
         
         print("\n" + "=" * 60)
         print(f"  [READY] Monitoring clipboard for screenshots...")
@@ -758,7 +845,7 @@ class AutoMarkerApp:
         self.is_monitoring = False
         self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
-        self.lbl_status.configure(text="Trạng thái: ĐANG DỪNG 🔴", text_color="#E74C3C")
+        self.lbl_status.configure(text="● ĐANG DỪNG", text_color="#E74C3C")
         print("\n⏹ Đã dừng tool vẽ khung.")
 
     def poll_clipboard(self):
