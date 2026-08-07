@@ -125,6 +125,14 @@ MATCH_SCALES = [
     0.9, 0.95, 1.0, 1.05, 1.1
 ]
 
+# In all-folders mode, limit template matching to at most this many reference
+# images per Query folder. Reducing refs cuts template scan time proportionally.
+# AI classification still compares candidates against ALL references for accuracy.
+# Set to 0 to disable the limit (use all refs — most accurate, slowest).
+# With OCR timestamp pre-filtering active, fewer folders reach template scan,
+# so a higher value here is affordable.
+TEMPLATE_REFS_PER_QUERY = 0
+
 # ============================================================
 # DRAWING PARAMETERS
 # ============================================================
@@ -190,3 +198,22 @@ IGNORE_LEFT_RATIO = 0.25
 
 # Ignore matches in the bottom X portion of the screen (e.g. 0.3 for bottom 30%)
 IGNORE_BOTTOM_RATIO = 0.35
+
+# ============================================================
+# OCR TIMESTAMP MATCHING
+# ============================================================
+# Enable OCR-based timestamp verification
+# When enabled, matches are filtered by comparing timestamps extracted from
+# reference images and clipboard screenshots
+ENABLE_OCR_TIMESTAMP_FILTER = True  # Tesseract installed at C:\Program Files\Tesseract-OCR
+
+# Tolerance in minutes for timestamp matching
+# Two timestamps are considered matching if they differ by at most this value
+# Reference images within this time window of the screenshot are kept
+OCR_TIMESTAMP_TOLERANCE = 5
+
+# OCR method for full screenshots: 'winocr' (recommended) or 'tesseract'
+# Windows OCR (winocr) reads white-on-dark text in Re-ID UI much better.
+# Small reference images always use Windows OCR (winocr) for accuracy.
+# When winocr is available it is always tried first regardless of this setting.
+OCR_METHOD = 'winocr'
