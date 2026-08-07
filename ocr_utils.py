@@ -5,8 +5,10 @@ Reads the TIME filter and per-card timestamps from the Re-ID UI to verify
 that clipboard images match the reference screenshot's time period.
 
 Strategy:
-  - Full screenshots: scan the TOP 20% (header area) using Tesseract.
-    Look for date ranges like "Aug 3-4" from the TIME filter (left panel).
+  - Full screenshots: scan the TOP 20% using Windows OCR (winocr) first,
+    falling back to Tesseract.  winocr handles white-on-dark UI text that
+    Tesseract cannot read.  Looks for date ranges like "Aug 3-4" from the
+    TIME filter (left panel) and card timestamps.
   - Small reference images (~78x187 person crops): use Windows OCR (WinRT)
     on the BOTTOM 25%, scaled up 8x.  This is the same engine Windows 11
     Photos uses and it reads overlay text that Tesseract cannot handle.
@@ -156,6 +158,84 @@ def extract_reference_timestamp(image_bgr: np.ndarray) -> Optional[str]:
                 except Exception:
                     pass
     return None
+
+
+# ============================================================
+# Windows OCR for full screenshots
+# ============================================================
+
+def _winocr_region(image_bgr: np.ndarray, y_start: float, y_end: float,
+                   x_start: float, x_end: float, scale: int = 3) -> str:
+    """Run Windows OCR on a rectangular region of a full screenshot.
+
+    Args:
+        image_bgr: BGR image (full screenshot).
+        y_start, y_end: Vertical crop as fractions of height (0.0-1.0).
+        x_start, x_end: Horizontal crop as fractions of width (0.0-1.0).
+        scale: Upscaling factor for better OCR accuracy.
+
+    Returns:
+        OCR text from the region, or "".
+    """
+    if not _WINOCR_AVAILABLE:
+        return ""
+
+    h, w = image_bgr.shape[:2]
+    y0 = max(int(h * y_start), 0)
+    y1 = min(int(h * y_end), h)
+    x0 = max(int(w * x_start), 0)
+    x1 = min(int(w * x_end), w)
+    roi = image_bgr[y0:y1, x0:x1]
+
+    rh, rw = roi.shape[:2]
+    if rh < 2 or rw < 2:
+        return ""
+
+    scaled = cv2.resize(roi, (rw * scale, rh * scale),
+                        interpolation=cv2.INTER_LANCZOS4)
+
+    async def _ocr():
+        result = await _winocr_recognize(scaled, 'en')
+        return result.text.strip() if result.text else ""
+
+    try:
+        return _run_async(_ocr())
+    except Exception:
+        return ""
+
+
+def _winocr_screenshot(image_bgr: np.ndarray) -> str:
+    """Run Windows OCR on the top portion of a full Re-ID screenshot.
+
+    Scans two regions where timestamps appear in the Re-ID UI:
+      1. Top-left panel (0-30% width, 0-20% height): TIME filter with
+         date range like "Aug 3-4" and time range like "7:00 AM - 12:00 PM"
+      2. Top-right area (30-100% width, 0-20% height): Result card
+         headers that may show timestamps
+
+    Windows OCR handles white text on dark background much better than
+    Tesseract, which is critical for the Re-ID UI's dark theme.
+
+    Returns:
+        Combined OCR text from both regions.
+    """
+    if not _WINOCR_AVAILABLE:
+        return ""
+
+    texts = []
+
+    # Region 1: top-left panel (TIME filter + date range)
+    # Use higher scale (4x) for this smaller region with critical data
+    t1 = _winocr_region(image_bgr, 0.0, 0.20, 0.0, 0.30, scale=4)
+    if t1:
+        texts.append(t1)
+
+    # Region 2: top-right header area (result cards may show times)
+    t2 = _winocr_region(image_bgr, 0.0, 0.20, 0.30, 1.0, scale=3)
+    if t2:
+        texts.append(t2)
+
+    return "\n".join(texts)
 
 
 # ============================================================
@@ -323,17 +403,43 @@ def extract_timestamp(image_bgr: np.ndarray, method: str = 'tesseract') -> Optio
       2. AM/PM times: "7:00 AM", "12:00 PM"
       3. 24h times: "14:30:25"
 
+    Uses Windows OCR (winocr) first when available — it handles the
+    dark-themed Re-ID UI (white text on dark background) much better
+    than Tesseract.  Falls back to Tesseract if winocr is unavailable
+    or returns nothing.
+
     Args:
         image_bgr: BGR image (full screenshot)
-        method: OCR backend ('tesseract' only for now)
+        method: OCR backend hint ('tesseract' or 'winocr').
+                When winocr is available it is always tried first
+                regardless of this setting.
 
     Returns:
         Extracted date/time string, or None if nothing found.
     """
-    text = _ocr_top20(image_bgr)
-    if not text:
-        return None
+    # --- Strategy 1: Windows OCR (best for dark UI) ---
+    if _WINOCR_AVAILABLE:
+        text = _winocr_screenshot(image_bgr)
+        if text:
+            result = _parse_from_text(text)
+            if result:
+                return result
 
+    # --- Strategy 2: Tesseract fallback ---
+    text = _ocr_top20(image_bgr)
+    if text:
+        result = _parse_from_text(text)
+        if result:
+            return result
+
+    return None
+
+
+def _parse_from_text(text: str) -> Optional[str]:
+    """Try to extract a date range or time from OCR text.
+
+    Priority: date range > AM/PM time > 24h time.
+    """
     # Priority 1: Date range (most reliable from the Re-ID UI)
     date_range = _parse_date_range(text)
     if date_range:

@@ -42,7 +42,7 @@ from config import (
     MAX_PIXEL_CANDIDATES, LIMIT_MATCHES_BY_REFERENCE_COUNT,
     FAST_ROOT_MODE, FAST_ROOT_PRIMARY_MODEL, FAST_ROOT_SHORTLIST_THRESHOLD,
     FAST_ROOT_MAX_ROWS, FACE_FEATURE_NAME, FACE_MATCH_THRESHOLD, FACE_MATCH_MARGIN,
-    FACE_MIN_REFERENCES,
+    FACE_MIN_REFERENCES, TEMPLATE_REFS_PER_QUERY,
     ENABLE_OCR_TIMESTAMP_FILTER, OCR_TIMESTAMP_TOLERANCE, OCR_METHOD,
 )
 from ocr_utils import extract_timestamp, extract_reference_timestamp, timestamps_match
@@ -647,40 +647,197 @@ class TemplateMatcher:
         # Extract timestamp from screenshot for comparison
         screenshot_timestamp = None
         if ENABLE_OCR_TIMESTAMP_FILTER:
+            import time as _time_ocr
+            _t_ocr = _time_ocr.time()
             try:
                 screenshot_timestamp = extract_timestamp(screenshot_bgr, method=OCR_METHOD)
                 if screenshot_timestamp:
-                    log("OCR", f"Screenshot timestamp: {screenshot_timestamp}")
+                    log("OCR", f"Screenshot timestamp: {screenshot_timestamp} "
+                        f"({_time_ocr.time()-_t_ocr:.1f}s)")
+                else:
+                    log("OCR", f"No timestamp found in screenshot "
+                        f"({_time_ocr.time()-_t_ocr:.1f}s)")
             except Exception as e:
                 log("OCR", f"Screenshot timestamp extraction failed: {e}")
+
+        # --- EARLY TIMESTAMP FILTER ---
+        # Temporarily hide Query folders whose reference timestamps don't
+        # match the screenshot. This speeds up BOTH the fast-root grid path
+        # AND the full template scan by avoiding template matching and AI
+        # classification for folders whose people are at a different time.
+        original_refs = None  # set when we narrow the view
+        if (ENABLE_OCR_TIMESTAMP_FILTER and screenshot_timestamp
+                and self.reference_timestamps):
+            skipped_queries = set()
+            for qn, ref_ts_list in self.reference_timestamps.items():
+                any_ts_match = any(
+                    timestamps_match(ref_ts, screenshot_timestamp,
+                                     tolerance_minutes=OCR_TIMESTAMP_TOLERANCE)
+                    for ref_ts in ref_ts_list
+                )
+                if not any_ts_match:
+                    skipped_queries.add(qn)
+            if skipped_queries:
+                log("OCR",
+                    f"Early skip {len(skipped_queries)} folder(s) by timestamp: "
+                    f"{sorted(skipped_queries)}")
+                # Swap in a filtered view; restore in the finally block
+                original_refs = self.reference_images
+                self.reference_images = {
+                    qn: refs for qn, refs in original_refs.items()
+                    if qn not in skipped_queries
+                }
+
+        try:
+            return self._find_matches_inner(screenshot_bgr, screenshot_timestamp)
+        finally:
+            # Always restore the full reference set
+            if original_refs is not None:
+                self.reference_images = original_refs
+
+    def _identify_query_folder(self, screenshot_bgr):
+        """Identify which query folder the screenshot belongs to.
+
+        Uses the first result card (the source/query image shown by the Re-ID
+        VMS UI) and template-matches it against reference images in each folder.
+        Returns the folder name with the best match, or None if no grid or no
+        confident match is found.
+        """
+        grid_boxes = self._detect_result_grid(screenshot_bgr)
+        if not grid_boxes:
+            return None
+
+        # The first card in the grid IS the query/source person image
+        sx1, sy1, sx2, sy2 = grid_boxes[0]
+        source_crop = screenshot_bgr[sy1:sy2, sx1:sx2]
+        if source_crop.shape[0] < 10 or source_crop.shape[1] < 10:
+            return None
+
+        source_gray = cv2.cvtColor(source_crop, cv2.COLOR_BGR2GRAY)
+        sh, sw = source_gray.shape[:2]
+
+        best_folder = None
+        best_score = -1.0
+
+        for query_name, refs in self.reference_images.items():
+            folder_best = -1.0
+            for _ref_name, ref_img, _ref_feat in refs:
+                ref_gray = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
+                rh, rw = ref_gray.shape[:2]
+
+                # Template-match the source card against this reference image
+                # at multiple scales. The source card and reference are both
+                # small person crops so we match ref inside source (or source
+                # inside ref) depending on relative sizes.
+                for scale in [0.9, 0.95, 1.0, 1.05, 1.1]:
+                    tw = int(rw * scale)
+                    th = int(rh * scale)
+                    if tw < 10 or th < 10:
+                        continue
+
+                    # Match ref (template) inside source card
+                    if tw < sw and th < sh:
+                        resized_ref = cv2.resize(ref_gray, (tw, th))
+                        result = cv2.matchTemplate(
+                            source_gray, resized_ref, cv2.TM_CCOEFF_NORMED
+                        )
+                        score = float(result.max())
+                        if score > folder_best:
+                            folder_best = score
+
+                    # Also match source card inside ref (in case ref is bigger)
+                    stw = int(sw * scale)
+                    sth = int(sh * scale)
+                    if stw < rw and sth < rh:
+                        resized_src = cv2.resize(source_gray, (stw, sth))
+                        result2 = cv2.matchTemplate(
+                            ref_gray, resized_src, cv2.TM_CCOEFF_NORMED
+                        )
+                        score2 = float(result2.max())
+                        if score2 > folder_best:
+                            folder_best = score2
+
+            if folder_best > best_score:
+                best_score = folder_best
+                best_folder = query_name
+
+            log("IDENTIFY",
+                f"{query_name}: source-card match score = {folder_best:.3f}")
+
+        if best_folder and best_score >= 0.5:
+            log("IDENTIFY",
+                f"Source card belongs to {best_folder} "
+                f"(score={best_score:.3f})")
+            return best_folder
+        else:
+            log("IDENTIFY",
+                f"No confident match for source card "
+                f"(best={best_folder}, score={best_score:.3f})")
+            return None
+
+    def _find_matches_inner(self, screenshot_bgr, screenshot_timestamp):
+        """Core matching logic, called after early timestamp filtering.
+
+        In all-folders mode with ENFORCE_SINGLE_QUERY, identifies the correct
+        query folder by template-matching the first result card (the source
+        query image shown by the VMS UI) against all reference folders. Only
+        the identified folder is scanned for result matches.
+        """
+        import time as _time
+        _t0 = _time.time()
+
+        active_count = sum(len(r) for r in self.reference_images.values())
+        if self.target_query is None and TEMPLATE_REFS_PER_QUERY > 0:
+            probe_count = sum(
+                min(len(r), TEMPLATE_REFS_PER_QUERY)
+                for r in self.reference_images.values()
+            )
+        else:
+            probe_count = active_count
+        log("PERF", f"Matching with {len(self.reference_images)} folder(s), "
+            f"{active_count} ref(s), template probes={probe_count}")
 
         if FAST_ROOT_MODE and self.target_query is None and len(self.reference_images) > 1:
             fast_matches = self._find_matches_fast_root(screenshot_bgr)
             if fast_matches:
-                # Apply timestamp filtering to fast matches
-                if ENABLE_OCR_TIMESTAMP_FILTER:
-                    fast_matches = self._filter_matches_by_timestamp(fast_matches, screenshot_timestamp)
+                log("PERF", f"Fast-root done in {_time.time()-_t0:.1f}s")
                 return fast_matches
-            # The fast grid classifier is an accelerator. When it produces no
-            # matches (grid not detected, or detected but every card rejected),
-            # fall back to the authoritative multi-scale template scan instead
-            # of concluding "no match". Single-folder mode always uses that scan,
-            # which is why it draws boxes the all-folders mode sometimes misses.
+            log("PERF", f"Fast-root fallback after {_time.time()-_t0:.1f}s")
 
-        all_matches = []
+        # --- SOURCE-CARD FOLDER IDENTIFICATION ---
+        # When ENFORCE_SINGLE_QUERY is on and multiple folders are loaded,
+        # identify which folder the screenshot belongs to by matching the
+        # first result card (source/query image) against reference images.
+        # Then only scan that specific folder instead of all folders.
+        identified_folder = None
+        scan_refs = self.reference_images  # default: scan all
+        if (ENFORCE_SINGLE_QUERY
+                and self.target_query is None
+                and len(self.reference_images) > 1):
+            _t_id = _time.time()
+            identified_folder = self._identify_query_folder(screenshot_bgr)
+            if identified_folder and identified_folder in self.reference_images:
+                scan_refs = {identified_folder: self.reference_images[identified_folder]}
+                log("PERF",
+                    f"Source-card identification: {identified_folder} "
+                    f"in {_time.time()-_t_id:.1f}s — scanning only this folder")
+            else:
+                log("PERF",
+                    f"Source-card identification failed "
+                    f"({_time.time()-_t_id:.1f}s) — scanning all folders")
+
         gray_screen = cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2GRAY)
         screen_h, screen_w = gray_screen.shape[:2]
-
-        # Probe each reference at the full scale set regardless of folder mode.
-        # All-folders mode used to scan scale 1.0 only as a speed optimization,
-        # but thumbs in a Re-ID screenshot are rarely the exact pixel size of
-        # the stored reference (which is o.s. offset by the card padding). That
-        # left a real correctness gap: single-folder mode matched at 0.9-1.1
-        # while all-folders mode silently missed the same thumbnails.
         scales = MATCH_SCALES
 
-        for query_name, refs in self.reference_images.items():
-            for ref_name, ref_img, ref_feat in refs:
+        all_matches = []
+        for query_name, refs in scan_refs.items():
+            if self.target_query is None and TEMPLATE_REFS_PER_QUERY > 0:
+                probe_refs = refs[:TEMPLATE_REFS_PER_QUERY]
+            else:
+                probe_refs = refs
+
+            for ref_name, ref_img, ref_feat in probe_refs:
                 ref_gray = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
                 ref_h, ref_w = ref_gray.shape[:2]
 
@@ -699,21 +856,15 @@ class TemplateMatcher:
                         gray_screen, resized_template, cv2.TM_CCOEFF_NORMED
                     )
 
-                    # Step 1: Pixel Matching (Use threshold from slider/config)
-                    # This filters out completely different images before AI verification
-                    # Only keep local maxima. This avoids creating hundreds of
-                    # nearly identical candidates around one thumbnail.
                     local_max = result >= cv2.dilate(result, np.ones((3, 3), np.uint8))
                     pixel_threshold = AUTO_PIXEL_THRESHOLD if AUTO_CALIBRATION else self.threshold
                     loc = np.where((result >= pixel_threshold) & local_max)
                     for pt in zip(*loc[::-1]):
                         x, y = pt
                         pixel_score = float(result[y, x])
-                        
+
                         if x < screen_w * IGNORE_LEFT_RATIO:
                             continue
-                            
-                        # Exclude matches in the bottom portion of the screen
                         if y > screen_h * (1.0 - IGNORE_BOTTOM_RATIO):
                             continue
 
@@ -726,32 +877,35 @@ class TemplateMatcher:
                             'scale': scale,
                         })
 
-        # Apply Non-Maximum Suppression to remove overlapping boxes
-        all_matches = self._non_max_suppression(all_matches, iou_threshold=0.3)
-        if len(all_matches) > MAX_PIXEL_CANDIDATES:
-            all_matches = sorted(
-                all_matches, key=lambda item: item['pixel_score'], reverse=True
-            )[:MAX_PIXEL_CANDIDATES]
-        
-        # --- GLOBAL AI CLASSIFICATION ---
-        # Every crop is compared against every identity, regardless of which
-        # template proposed its location.
-        verified_matches = []
-        for m in all_matches:
-            x, y, x2, y2 = m['bbox']
-            candidate_bgr = screenshot_bgr[y:y2, x:x2]
-            if candidate_bgr.shape[0] < 10 or candidate_bgr.shape[1] < 10:
-                continue
-                
-            classification = self._classify_candidate(candidate_bgr)
-            if classification:
-                m.update(classification)
-                verified_matches.append(m)
-                
-        all_matches = verified_matches
-        
-        # Domain rule: each screenshot contains exactly one target person, so
-        # keep only the query with the most boxes (see ENFORCE_SINGLE_QUERY).
+        # --- NMS + AI classification on all candidates ---
+        if all_matches:
+            all_matches = self._non_max_suppression(
+                all_matches, iou_threshold=0.3)
+            if len(all_matches) > MAX_PIXEL_CANDIDATES:
+                all_matches = sorted(
+                    all_matches,
+                    key=lambda item: item['pixel_score'], reverse=True
+                )[:MAX_PIXEL_CANDIDATES]
+
+            _t1 = _time.time()
+            log("PERF", f"Template scan: {len(all_matches)} candidates "
+                f"in {_t1-_t0:.1f}s")
+
+            verified_matches = []
+            for m in all_matches:
+                x, y, x2, y2 = m['bbox']
+                candidate_bgr = screenshot_bgr[y:y2, x:x2]
+                if candidate_bgr.shape[0] < 10 or candidate_bgr.shape[1] < 10:
+                    continue
+                classification = self._classify_candidate(candidate_bgr)
+                if classification:
+                    m.update(classification)
+                    verified_matches.append(m)
+
+            all_matches = verified_matches
+            log("PERF", f"AI classify: {len(all_matches)} verified "
+                f"in {_time.time()-_t1:.1f}s")
+
         if ENFORCE_SINGLE_QUERY:
             all_matches = dominant_query_only(all_matches)
 
@@ -826,9 +980,9 @@ class TemplateMatcher:
                 for m in row_matches:
                     m['bbox'] = (m['bbox'][0], aligned_y1, m['bbox'][2], aligned_y2)
 
-        # Apply timestamp filtering at the end
-        if ENABLE_OCR_TIMESTAMP_FILTER:
-            all_matches = self._filter_matches_by_timestamp(all_matches, screenshot_timestamp)
+        # Timestamp filtering is already applied early in find_matches()
+        # (folders with mismatched timestamps are removed from reference_images
+        # before reaching this method), so no post-filter is needed here.
 
         return all_matches
 
