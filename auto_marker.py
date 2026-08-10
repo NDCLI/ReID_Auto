@@ -478,9 +478,22 @@ class TemplateMatcher:
             log(
                 "REJECT",
                 f"Ảnh tham chiếu tốt nhất {best['best_reference_score']:.3f}"
-                f"<{AI_BEST_REFERENCE_THRESHOLD:.3f}; loại ứng viên mơ hồ",
+                f" < {AI_BEST_REFERENCE_THRESHOLD} — bỏ qua"
             )
             return face_result
+
+        # === KẾT HỢP LOGIC FACE & BODY ===
+        # Nếu trích xuất được khuôn mặt, BẮT BUỘC khuôn mặt cũng phải khớp với Body.
+        # Điều này giúp loại bỏ những người mặc đồng phục giống nhau (Body khớp cao nhưng Face là người khác).
+        if FACE_FEATURE_NAME in candidate_features:
+            if not face_result:
+                log("REJECT", f"Body khớp {best['query']} ({best['score']:.3f}) nhưng khuôn mặt lạ (dưới ngưỡng) -> Bỏ qua")
+                return None
+            if face_result['query'] != best['query']:
+                log("REJECT", f"Xung đột Face/Body: Body={best['query']}, Face={face_result['query']} -> Bỏ qua")
+                return None
+            # Face và Body đồng thuận!
+            log("AI", f"Face & Body đồng thuận: {best['query']}")
 
         if AI_REQUIRE_MODEL_AGREEMENT and len(per_model_winners) > 1:
             winners = []
@@ -730,7 +743,11 @@ class TemplateMatcher:
                 return match, True
 
             x1, y1, x2, y2 = match["bbox"]
-            crop = screenshot_bgr[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
+            # Snap to the exact card boundaries to ensure the timestamp is included
+            gray = cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2GRAY)
+            cx1, cy1, cx2, cy2 = _snap_box_to_card(gray, (x1, y1, x2, y2))
+            crop = screenshot_bgr[max(0, cy1):max(0, cy2), max(0, cx1):max(0, cx2)]
+            
             if crop.shape[0] < 10 or crop.shape[1] < 10:
                 return match, True
 
