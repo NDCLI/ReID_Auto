@@ -444,7 +444,7 @@ class AutoMarkerApp:
         log_frame = tk.Frame(content, bg="#1E272C")
         log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
         
-        scrollbar = tk.Scrollbar(log_frame)
+        scrollbar = ctk.CTkScrollbar(log_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.txt_logs = tk.Text(
@@ -462,7 +462,7 @@ class AutoMarkerApp:
             state="disabled"
         )
         self.txt_logs.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.txt_logs.yview)
+        scrollbar.configure(command=self.txt_logs.yview)
 
         # Control bar (bottom of content) — single row: BẬT/TẮT + query picker
         controls = ctk.CTkFrame(content, fg_color="transparent")
