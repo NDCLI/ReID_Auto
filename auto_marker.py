@@ -755,13 +755,17 @@ class TemplateMatcher:
                 return match, True
 
             # Chỉ loại bỏ khi ảnh có mốc thời gian đó đang được dùng làm ảnh gốc (source query)
+            # VÀ thư mục mẫu chỉ có DUY NHẤT 1 ảnh ở mốc thời gian này.
+            # Nếu người dùng lưu >= 2 ảnh ở cùng mốc thời gian này, nghĩa là họ thực sự muốn tìm
+            # người này ở khoảng thời gian đó -> Bỏ qua lệnh loại bỏ, giữ lại để AI kiểm tra!
             if source_ts and card_ts == source_ts:
-                log(
-                    "OCR",
-                    f"Rejected {query_name} card at x={x1}: time {card_ts} "
-                    f"trùng với ảnh gốc (đây là người khác đi qua cùng phút)."
-                )
-                return match, False
+                if ref_timestamps.count(source_ts) == 1:
+                    log(
+                        "OCR",
+                        f"Rejected {query_name} card at x={x1}: time {card_ts} "
+                        f"trùng với ảnh gốc (chỉ có 1 ảnh mẫu giờ này -> người khác đi qua)."
+                    )
+                    return match, False
 
             if any(
                 timestamps_match(card_ts, ref_ts,
