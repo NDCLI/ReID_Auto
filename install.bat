@@ -34,7 +34,7 @@ echo.
 
 :: Kiem tra cac thu vien da cai dat chua
 echo Dang kiem tra cac thu vien...
-python -c "import cv2, numpy, PIL, win32api, openvino, customtkinter, pystray" >nul 2>&1
+python -c "import cv2, numpy, PIL, win32api, openvino, customtkinter, pystray, rapidocr" >nul 2>&1
 IF %ERRORLEVEL% EQU 0 GOTO LIBS_FOUND
 
 :: Cap nhat pip

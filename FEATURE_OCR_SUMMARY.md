@@ -7,7 +7,7 @@
 - ✓ Tự động tìm vùng chứa timestamp trên ảnh
 - ✓ Tiền xử lý ảnh (CLAHE, threshold, denoise)
 - ✓ Parse nhiều định dạng timestamp
-- ✓ So sánh timestamp với độ dung sai
+- ✓ So sánh timestamp khớp chính xác theo HH:MM
 
 ### 2. Tích hợp vào `auto_marker.py`
 - ✓ Đọc timestamp từ ảnh mẫu khi load Query
@@ -17,9 +17,9 @@
 
 ### 3. Cấu hình `config.py`
 ```python
-ENABLE_OCR_TIMESTAMP_FILTER = False  # Bật khi đã cài Tesseract
-OCR_TIMESTAMP_TOLERANCE = 5          # Dung sai 5 giây
-OCR_METHOD = 'tesseract'             # Phương pháp OCR
+ENABLE_OCR_TIMESTAMP_FILTER = True   # Lọc timestamp theo từng thẻ
+OCR_TIMESTAMP_TOLERANCE = 0           # Bắt buộc khớp đúng HH:MM
+OCR_METHOD = 'winocr'                 # Hint cho OCR toàn màn hình
 ```
 
 ### 4. File mới
@@ -86,11 +86,12 @@ App sẽ tự động:
 
 ## ⚙️ Cấu hình nâng cao
 
-### Tăng độ dung sai
-Nếu ảnh có timestamp chênh lệch nhiều:
+### Quy tắc khớp timestamp
+Timestamp trên thẻ chỉ có giờ và phút, nên mặc định phải khớp đúng `HH:MM`:
 ```python
-OCR_TIMESTAMP_TOLERANCE = 15  # Tăng lên 15 giây
+OCR_TIMESTAMP_TOLERANCE = 0
 ```
+Không dùng dung sai mặc định để tránh nhận nhầm người ở thời điểm khác.
 
 ### Tắt tính năng nếu gặp vấn đề
 ```python

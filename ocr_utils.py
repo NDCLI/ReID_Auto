@@ -6,12 +6,10 @@ that clipboard images match the reference screenshot's time period.
 
 Strategy:
   - Full screenshots: scan the TOP 20% using Windows OCR (winocr) first,
-    falling back to Tesseract.  winocr handles white-on-dark UI text that
-    Tesseract cannot read.  Looks for date ranges like "Aug 3-4" from the
-    TIME filter (left panel) and card timestamps.
-  - Small reference images (~78x187 person crops): use Windows OCR (WinRT)
-    on the BOTTOM 25%, scaled up 8x.  This is the same engine Windows 11
-    Photos uses and it reads overlay text that Tesseract cannot handle.
+    falling back to Tesseract. This reads the TIME filter/date range.
+  - Small reference images (~78x187 person crops): use RapidOCR with the
+    OpenVINO CPU backend on enlarged bottom crops, then Windows OCR and
+    Tesseract as fallbacks. Multiple RapidOCR variants vote on the timestamp.
   - Compare extracted values between reference and clipboard screenshots.
 """
 
@@ -38,6 +36,12 @@ try:
     _WINOCR_AVAILABLE = True
 except ImportError:
     pass
+
+# RapidOCR is the preferred backend for tiny card timestamps. Import it lazily
+# because the optional package loads ONNX models and is not needed at startup
+# when OCR filtering is disabled.
+_RAPIDOCR_AVAILABLE = None
+_RAPIDOCR_ENGINE = None
 
 # Month name mapping
 _MONTH_MAP = {
@@ -106,11 +110,128 @@ def _winocr_bottom(image_bgr: np.ndarray, bottom_pct: float = 0.25,
         return ""
 
 
+def _get_rapidocr_engine():
+    """Load and cache the optional RapidOCR ONNX engine on first use."""
+    global _RAPIDOCR_AVAILABLE, _RAPIDOCR_ENGINE
+    if _RAPIDOCR_AVAILABLE is False:
+        return None
+    if _RAPIDOCR_ENGINE is not None:
+        return _RAPIDOCR_ENGINE
+
+    try:
+        from rapidocr import RapidOCR
+        from rapidocr.utils.typings import EngineType
+        # Reuse the project's OpenVINO runtime. RapidOCR defaults to
+        # onnxruntime, whose Windows DLL can fail to initialize on some Python
+        # environments even though OpenVINO is already working for ReID.
+        openvino_params = {
+            "Global.log_level": "error",
+            "Det.engine_type": EngineType.OPENVINO,
+            "Cls.engine_type": EngineType.OPENVINO,
+            "Rec.engine_type": EngineType.OPENVINO,
+        }
+        _RAPIDOCR_ENGINE = RapidOCR(params=openvino_params)
+        _RAPIDOCR_AVAILABLE = True
+    except (ImportError, OSError, RuntimeError, ValueError):
+        _RAPIDOCR_AVAILABLE = False
+        _RAPIDOCR_ENGINE = None
+    return _RAPIDOCR_ENGINE
+
+
+def _rapidocr_result_items(result):
+    """Return ``(text, confidence)`` pairs from RapidOCR result variants."""
+    if isinstance(result, tuple):
+        result = result[0]
+    if result is None:
+        return []
+
+    texts = getattr(result, "txts", None)
+    scores = getattr(result, "scores", None)
+    if texts is None and isinstance(result, dict):
+        texts = result.get("txts") or result.get("texts")
+        scores = result.get("scores")
+    if texts is not None:
+        if scores is None:
+            scores = []
+        return [
+            (str(text), float(scores[index]) if index < len(scores) else 0.0)
+            for index, text in enumerate(texts)
+            if text
+        ]
+
+    # Older RapidOCR releases return rows like [box, text, score].
+    if isinstance(result, (list, tuple)):
+        items = []
+        for row in result:
+            if not isinstance(row, (list, tuple)) or len(row) < 2:
+                continue
+            text = row[1]
+            score = row[2] if len(row) > 2 else 0.0
+            if isinstance(text, str) and text:
+                try:
+                    score = float(score)
+                except (TypeError, ValueError):
+                    score = 0.0
+                items.append((text, score))
+        return items
+    return []
+
+
+def _rapidocr_variants(image_bgr: np.ndarray):
+    """Yield enlarged bottom-card crops for RapidOCR."""
+    h, w = image_bgr.shape[:2]
+    for bottom_pct in (0.25, 0.30, 0.20):
+        bottom = image_bgr[int(h * (1 - bottom_pct)):, :]
+        if bottom.shape[0] < 2 or bottom.shape[1] < 2:
+            continue
+        scale = 8
+        enlarged = cv2.resize(
+            bottom,
+            (bottom.shape[1] * scale, bottom.shape[0] * scale),
+            interpolation=cv2.INTER_CUBIC,
+        )
+        # The color crop preserves the anti-aliased white glyph edges. Three
+        # nearby bottom bands provide consensus without multiplying OCR cost
+        # with grayscale/binary variants that can erase tiny characters.
+        yield enlarged
+
+
+def _rapidocr_timestamp(image_bgr: np.ndarray) -> Optional[str]:
+    """Extract a timestamp with RapidOCR using consensus across crop variants."""
+    engine = _get_rapidocr_engine()
+    if engine is None:
+        return None
+
+    votes = {}
+    for variant in _rapidocr_variants(image_bgr):
+        try:
+            result = engine(variant)
+        except (OSError, RuntimeError, ValueError, TypeError):
+            continue
+        for text, confidence in _rapidocr_result_items(result):
+            timestamp = _parse_time_ampm(text)
+            if timestamp:
+                votes.setdefault(timestamp, []).append(confidence)
+
+    if not votes:
+        return None
+    return max(
+        votes,
+        key=lambda timestamp: (
+            len(votes[timestamp]),
+            max(votes[timestamp]),
+            sum(votes[timestamp]) / len(votes[timestamp]),
+        ),
+    )
+
+
 def extract_reference_timestamp(image_bgr: np.ndarray) -> Optional[str]:
     """Extract a time like '7:42 AM' from a small reference person crop.
 
-    Uses Windows OCR (WinRT) — the same engine as Windows 11 Photos.
-    Falls back to Tesseract if WinRT is unavailable.
+    RapidOCR with the OpenVINO CPU backend is preferred for tiny text and uses
+    consensus across
+    several enlarged crops. Windows OCR and Tesseract remain fallbacks so OCR
+    stays optional and an unreadable crop never breaks matching.
 
     Args:
         image_bgr: BGR image (small person crop, ~78x187px).
@@ -118,8 +239,12 @@ def extract_reference_timestamp(image_bgr: np.ndarray) -> Optional[str]:
     Returns:
         Normalized time string like '7:42 AM', or None.
     """
-    # --- Strategy 1: Windows OCR (best for small overlay text) ---
-    # Try multiple crop/scale combos for maximum accuracy (~98%).
+    # --- Strategy 1: RapidOCR (best for tiny overlay text) ---
+    rapid_timestamp = _rapidocr_timestamp(image_bgr)
+    if rapid_timestamp:
+        return rapid_timestamp
+
+    # --- Strategy 2: Windows OCR fallback ---
     if _WINOCR_AVAILABLE:
         for bpct in [0.25, 0.30, 0.20, 0.35]:
             for scale in [8, 10, 12, 6]:
@@ -129,7 +254,7 @@ def extract_reference_timestamp(image_bgr: np.ndarray) -> Optional[str]:
                     if time_str:
                         return time_str
 
-    # --- Strategy 2: Tesseract fallback (rarely works on small crops) ---
+    # --- Strategy 3: Tesseract fallback ---
     try:
         import pytesseract
     except ImportError:
@@ -494,20 +619,22 @@ def _normalize_time_to_minutes(s: str) -> Optional[int]:
 
 
 def timestamps_match(timestamp1: Optional[str], timestamp2: Optional[str],
-                     tolerance_minutes: int = 30) -> bool:
+                     tolerance_minutes: int = 0) -> bool:
     """Check if two extracted time/date values match.
 
     Handles three comparison modes:
       - Date range vs date range: "Aug 3-4" overlaps "Aug 3-4" -> True
-      - Time vs time: "7:00 AM" vs "7:05 AM" within tolerance -> True
+      - Time vs time: exact HH:MM matches by default; callers may opt into a
+        wider tolerance for broad capture windows.
       - Mixed types or missing: graceful fallback -> True
 
     Args:
         timestamp1: First extracted string (or None)
         timestamp2: Second extracted string (or None)
         tolerance_minutes: Max difference in minutes for time comparisons.
-            Default 30 minutes because reference images may span a range
-            of capture times.
+            Pass 0 to require the exact same HH:MM, which is what the Re-ID UI
+            prints on each card. The default stays loose for callers comparing
+            broad capture windows rather than individual cards.
 
     Returns:
         True if they match (or if comparison is impossible -> allow).

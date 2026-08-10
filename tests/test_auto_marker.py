@@ -1,9 +1,21 @@
 """Unit tests for auto_marker.py — geometry helpers, NMS, box drawing logic."""
 
 import unittest
+from contextlib import contextmanager
 import numpy as np
 
 import auto_marker
+
+
+@contextmanager
+def patch_ocr_enabled():
+    """Temporarily force ENABLE_OCR_TIMESTAMP_FILTER on for a test."""
+    original = auto_marker.ENABLE_OCR_TIMESTAMP_FILTER
+    auto_marker.ENABLE_OCR_TIMESTAMP_FILTER = True
+    try:
+        yield
+    finally:
+        auto_marker.ENABLE_OCR_TIMESTAMP_FILTER = original
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +247,135 @@ class TestBestReferenceRejection(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["query"], "Query_1")
         self.assertAlmostEqual(result["best_reference_score"], gate + 0.05)
+
+
+# ---------------------------------------------------------------------------
+# Accepted-match alignment and fast-root card retention
+# ---------------------------------------------------------------------------
+class TestAcceptedMatchRetention(unittest.TestCase):
+    def setUp(self):
+        self.matcher = auto_marker.TemplateMatcher.__new__(
+            auto_marker.TemplateMatcher
+        )
+        self.matcher.reference_images = {
+            "Query_1": [
+                (f"ref_{index}.png", None, {}) for index in range(6)
+            ]
+        }
+        # No reference timestamps → the per-card OCR gate keeps every match,
+        # so these tests exercise only the cap/alignment behavior.
+        self.matcher.reference_timestamps = {}
+
+    def test_reference_count_cap_reserves_source_slot(self):
+        matches = [
+            {
+                "bbox": (index * 100, 10, index * 100 + 80, 196),
+                "query": "Query_1",
+                "score": 0.9 - index * 0.01,
+            }
+            for index in range(6)
+        ]
+
+        result = self.matcher._limit_and_align_matches(matches)
+
+        self.assertEqual(len(result), 5)
+        self.assertEqual({match["query"] for match in result}, {"Query_1"})
+        self.assertNotIn((500, 10, 580, 196), [match["bbox"] for match in result])
+
+    def test_fast_root_reserves_source_slot_in_result_cap(self):
+        boxes = [
+            (index * 100, 10, index * 100 + 80, 196)
+            for index in range(20)
+        ]
+
+        class FakeFastExtractor:
+            models = {auto_marker.FAST_ROOT_PRIMARY_MODEL}
+            active_models = (auto_marker.FAST_ROOT_PRIMARY_MODEL,)
+            face_model = None
+
+            @staticmethod
+            def extract_feature(_crop, model_names=None):
+                return {name: np.ones(1) for name in (model_names or ())}
+
+        self.matcher.ai_extractor = FakeFastExtractor()
+        self.matcher._detect_result_grid = lambda _image: boxes
+        self.matcher._rank_features = lambda _features, _models: [
+            {"score": 0.9}
+        ]
+        self.matcher._classify_features = lambda _features: {
+            "query": "Query_1",
+            "ref_name": "ref_0.png",
+            "score": 0.9,
+        }
+
+        result = self.matcher._find_matches_fast_root(
+            np.zeros((220, 2000, 3), dtype=np.uint8)
+        )
+
+        self.assertEqual(len(result), 5)
+        self.assertNotIn(boxes[0], [match["bbox"] for match in result])
+        self.assertTrue(
+            {match["bbox"][0] for match in result}.issubset(
+                {box[0] for box in boxes[1:]}
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# Per-card OCR timestamp gate
+# ---------------------------------------------------------------------------
+class TestCardTimestampGate(unittest.TestCase):
+    """A card is rejected only when its own printed time is read confidently
+    and matches no reference time for that identity. Unreadable times, or
+    queries without reference times, are kept so the AI score decides."""
+
+    def setUp(self):
+        self.matcher = auto_marker.TemplateMatcher.__new__(
+            auto_marker.TemplateMatcher
+        )
+        self.matcher.reference_timestamps = {
+            "Query_1": ["12:12 PM", "11:43 AM", "11:44 AM", "12:15 PM"]
+        }
+        self.screen = np.zeros((300, 2000, 3), dtype=np.uint8)
+
+    def _run(self, card_times):
+        matches = [
+            {"bbox": (i * 100, 10, i * 100 + 80, 196), "query": "Query_1",
+             "score": 0.9}
+            for i in range(len(card_times))
+        ]
+        # Stub the card-crop OCR to return the scripted time for each match in
+        # order (matches are processed sequentially in the helper).
+        import auto_marker as am
+        original = am.extract_reference_timestamp
+        calls = {"i": 0}
+
+        def fake_extract(_crop):
+            time = card_times[calls["i"]]
+            calls["i"] += 1
+            return time
+
+        am.extract_reference_timestamp = fake_extract
+        try:
+            with patch_ocr_enabled():
+                return self.matcher._filter_matches_by_card_timestamp(
+                    matches, self.screen
+                )
+        finally:
+            am.extract_reference_timestamp = original
+
+    def test_keeps_matching_and_unreadable_rejects_stranger(self):
+        result = self._run(["12:12 PM", "11:43 AM", None, "11:32 AM"])
+        kept_x = {m["bbox"][0] for m in result}
+        self.assertIn(0, kept_x)     # 12:12 PM matches
+        self.assertIn(100, kept_x)   # 11:43 AM matches
+        self.assertIn(200, kept_x)   # unreadable → kept
+        self.assertNotIn(300, kept_x)  # 11:32 AM stranger → rejected
+
+    def test_query_without_references_keeps_all(self):
+        self.matcher.reference_timestamps = {}
+        result = self._run(["3:00 PM", "9:99 ZZ"])
+        self.assertEqual(len(result), 2)
 
 
 # ---------------------------------------------------------------------------
