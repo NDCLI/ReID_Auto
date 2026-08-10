@@ -326,11 +326,11 @@ class AutoMarkerApp:
 
         lbl_title = ctk.CTkLabel(
             header,
-            text="📸 RE-ID AUTO DRAW",
+            text="📸 AUTOMARKER REID",
             font=("Segoe UI", 15, "bold"),
             text_color="#3498DB",
         )
-        lbl_title.pack(side=tk.LEFT)
+        lbl_title.pack(expand=True, pady=2)
 
         self.lbl_status = ctk.CTkLabel(
             header,
@@ -338,7 +338,7 @@ class AutoMarkerApp:
             text_color="#E74C3C",
             font=("Segoe UI", 11, "bold"),
         )
-        self.lbl_status.pack(side=tk.RIGHT)
+        self.lbl_status.place(relx=1.0, rely=0.5, anchor="e")
 
         # Body: sidebar (left) + content (right)
         body = ctk.CTkFrame(self.root, fg_color="transparent")
