@@ -28,6 +28,7 @@ import argparse
 import numpy as np
 import cv2
 from PIL import Image, ImageGrab
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import win32clipboard
 
 from config import (
@@ -181,36 +182,84 @@ class TemplateMatcher:
                 if query_name not in self.reference_images:
                     self.reference_images[query_name] = []
 
-                # Extract timestamps from reference images using Windows OCR
-                # (same engine as Windows 11 Photos) or Tesseract fallback.
+                # Extract timestamps from reference images using RapidOCR
+                # and Windows OCR (same engine as Windows 11 Photos).
                 ref_timestamps_for_query = []
+                cache_dir = os.path.join(item_path, ".cache")
+                os.makedirs(cache_dir, exist_ok=True)
+                
                 for img_file in sorted(os.listdir(item_path), key=natural_sort_key):
                     if not img_file.lower().endswith(valid_extensions):
                         continue
 
                     img_path = os.path.join(item_path, img_file)
-                    img = cv2.imread(img_path)
-                    if img is None:
-                        log("WARN", f"Cannot read: {img_path}")
+                    
+                    if self._is_query_image(img_file):
+                        img = cv2.imread(img_path)
+                        if img is not None:
+                            self.query_images[query_name] = img
+                            log("QUERY", f"{query_name}/{img_file} (excluded from matching)")
                         continue
 
-                    if self._is_query_image(img_file):
-                        self.query_images[query_name] = img
-                        log("QUERY", f"{query_name}/{img_file} (excluded from matching)")
-                    else:
-                        feat = self.ai_extractor.extract_feature(img)
-                        self.reference_images[query_name].append((img_file, img, feat))
+                    # Feature Caching
+                    feat_cache_path = os.path.join(cache_dir, f"{img_file}.npz")
+                    ocr_cache_path = os.path.join(cache_dir, f"{img_file}.ocr.txt")
+                    img_mtime = os.path.getmtime(img_path)
+                    
+                    feat = None
+                    if os.path.exists(feat_cache_path) and os.path.getmtime(feat_cache_path) >= img_mtime:
+                        try:
+                            with np.load(feat_cache_path) as data:
+                                feat = {k: data[k] for k in data.files}
+                        except Exception:
+                            feat = None
 
-                        # OCR: extract timestamp from reference image
-                        ref_ts = None
-                        if ENABLE_OCR_TIMESTAMP_FILTER:
+                    ref_ts = None
+                    if ENABLE_OCR_TIMESTAMP_FILTER:
+                        if os.path.exists(ocr_cache_path) and os.path.getmtime(ocr_cache_path) >= img_mtime:
+                            try:
+                                with open(ocr_cache_path, 'r', encoding='utf-8') as f:
+                                    content = f.read().strip()
+                                    ref_ts = content if content else None
+                            except Exception:
+                                ref_ts = None
+                        else:
+                            # Need to OCR (handled below)
+                            ref_ts = False # Use False to indicate it needs computation
+
+                    if feat is None or (ENABLE_OCR_TIMESTAMP_FILTER and ref_ts is False):
+                        img = cv2.imread(img_path)
+                        if img is None:
+                            log("WARN", f"Cannot read: {img_path}")
+                            continue
+                            
+                        if feat is None:
+                            feat = self.ai_extractor.extract_feature(img)
+                            try:
+                                np.savez(feat_cache_path, **feat)
+                            except Exception as e:
+                                log("WARN", f"Failed to save feature cache: {e}")
+                                
+                        if ENABLE_OCR_TIMESTAMP_FILTER and ref_ts is False:
                             ref_ts = extract_reference_timestamp(img)
-                            if ref_ts:
-                                ref_timestamps_for_query.append(ref_ts)
+                            try:
+                                with open(ocr_cache_path, 'w', encoding='utf-8') as f:
+                                    f.write(ref_ts if ref_ts else "")
+                            except Exception as e:
+                                log("WARN", f"Failed to save OCR cache: {e}")
 
-                        ts_info = f" | OCR: {ref_ts}" if ref_ts else ""
-                        log("REF", f"{query_name}/{img_file} ({img.shape[1]}x{img.shape[0]}){ts_info}")
-                    time.sleep(0.01)  # Yield CPU to keep GUI responsive
+                    # Only read image if we didn't already read it and we need it for shape/reference
+                    img = cv2.imread(img_path) if 'img' not in locals() or img is None else img
+                    if img is None:
+                         continue
+                         
+                    self.reference_images[query_name].append((img_file, img, feat))
+                    if ENABLE_OCR_TIMESTAMP_FILTER and ref_ts:
+                        ref_timestamps_for_query.append(ref_ts)
+
+                    ts_info = f" | OCR: {ref_ts}" if ref_ts else ""
+                    log("REF", f"{query_name}/{img_file} ({img.shape[1]}x{img.shape[0]}){ts_info}")
+                    time.sleep(0.005)  # Yield CPU to keep GUI responsive
 
                 # Store ALL timestamps for this query (each ref may be at a different time)
                 if ref_timestamps_for_query and ENABLE_OCR_TIMESTAMP_FILTER:
@@ -241,10 +290,29 @@ class TemplateMatcher:
                     self.query_images[query_name] = img
                     log("QUERY", f"Root/{item_name} (excluded from matching)")
                 else:
-                    feat = self.ai_extractor.extract_feature(img)
+                    cache_dir = os.path.join(queries_dir, ".cache")
+                    os.makedirs(cache_dir, exist_ok=True)
+                    feat_cache_path = os.path.join(cache_dir, f"{item_name}.npz")
+                    img_mtime = os.path.getmtime(item_path)
+                    
+                    feat = None
+                    if os.path.exists(feat_cache_path) and os.path.getmtime(feat_cache_path) >= img_mtime:
+                        try:
+                            with np.load(feat_cache_path) as data:
+                                feat = {k: data[k] for k in data.files}
+                        except Exception:
+                            feat = None
+                            
+                    if feat is None:
+                        feat = self.ai_extractor.extract_feature(img)
+                        try:
+                            np.savez(feat_cache_path, **feat)
+                        except Exception:
+                            pass
+                            
                     self.reference_images[query_name].append((item_name, img, feat))
                     log("REF", f"Root/{item_name} ({img.shape[1]}x{img.shape[0]})")
-                time.sleep(0.01)  # Yield CPU to keep GUI responsive
+                time.sleep(0.005)  # Yield CPU to keep GUI responsive
 
         total_refs = sum(len(refs) for refs in self.reference_images.values())
         total_queries = len(self.reference_images)
@@ -654,37 +722,44 @@ class TemplateMatcher:
             return matches
 
         kept = []
-        for match in matches:
+        
+        def process_match(match):
             query_name = match.get("query")
             ref_timestamps = self.reference_timestamps.get(query_name)
             if not ref_timestamps:
-                kept.append(match)
-                continue
+                return match, True
 
             x1, y1, x2, y2 = match["bbox"]
             crop = screenshot_bgr[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
             if crop.shape[0] < 10 or crop.shape[1] < 10:
-                kept.append(match)
-                continue
+                return match, True
 
             card_ts = extract_reference_timestamp(crop)
             if not card_ts:
                 # Unreadable time — do not reject, trust the AI score.
-                kept.append(match)
-                continue
+                return match, True
 
             if any(
                 timestamps_match(card_ts, ref_ts,
                                  tolerance_minutes=OCR_TIMESTAMP_TOLERANCE)
                 for ref_ts in ref_timestamps
             ):
-                kept.append(match)
+                return match, True
             else:
                 log(
                     "OCR",
                     f"Rejected {query_name} card at x={x1}: time {card_ts} "
                     f"not in references {sorted(set(ref_timestamps))}",
                 )
+                return match, False
+
+        with ThreadPoolExecutor() as executor:
+            future_to_match = {executor.submit(process_match, m): m for m in matches}
+            for future in as_completed(future_to_match):
+                match, is_kept = future.result()
+                if is_kept:
+                    kept.append(match)
+                    
         return kept
 
     def _remove_source_grid_match(self, matches, screenshot_bgr):
@@ -873,12 +948,12 @@ class TemplateMatcher:
         log("PERF", f"Matching with {len(self.reference_images)} folder(s), "
             f"{active_count} ref(s), template probes={probe_count}")
 
-        if FAST_ROOT_MODE and self.target_query is None and len(self.reference_images) > 1:
+        if FAST_ROOT_MODE:
             fast_matches = self._find_matches_fast_root(screenshot_bgr)
-            if fast_matches:
-                log("PERF", f"Fast-root done in {_time.time()-_t0:.1f}s")
+            if fast_matches is not None:
+                log("PERF", f"Fast grid done in {_time.time()-_t0:.1f}s")
                 return fast_matches
-            log("PERF", f"Fast-root fallback after {_time.time()-_t0:.1f}s")
+            log("PERF", f"Fast grid fallback after {_time.time()-_t0:.1f}s")
 
         # --- SOURCE-CARD FOLDER IDENTIFICATION ---
         # When ENFORCE_SINGLE_QUERY is on and multiple folders are loaded,
@@ -991,15 +1066,25 @@ class TemplateMatcher:
                 f"in {_t1-_t0:.1f}s")
 
             verified_matches = []
-            for m in all_matches:
+            
+            def process_candidate(m):
                 x, y, x2, y2 = m['bbox']
                 candidate_bgr = screenshot_bgr[y:y2, x:x2]
                 if candidate_bgr.shape[0] < 10 or candidate_bgr.shape[1] < 10:
-                    continue
+                    return None
                 classification = self._classify_candidate(candidate_bgr)
                 if classification:
-                    m.update(classification)
-                    verified_matches.append(m)
+                    m_copy = dict(m)
+                    m_copy.update(classification)
+                    return m_copy
+                return None
+
+            with ThreadPoolExecutor() as executor:
+                future_to_m = {executor.submit(process_candidate, m): m for m in all_matches}
+                for future in as_completed(future_to_m):
+                    result = future.result()
+                    if result:
+                        verified_matches.append(result)
 
             all_matches = verified_matches
             log("PERF", f"AI classify: {len(all_matches)} verified "

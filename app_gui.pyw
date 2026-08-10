@@ -813,33 +813,49 @@ class AutoMarkerApp:
         self.is_monitoring = True
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
-        self.lbl_status.configure(text="● ĐANG CHẠY", text_color="#2ECC71")
+        self.lbl_status.configure(text="● ĐANG KHỞI TẠO AI...", text_color="#F39C12")
         
-        print("\n" + "=" * 60)
-        print(f"  [READY] Monitoring clipboard for screenshots...")
-        print(f"  [INFO] Output directory: {OUTPUT_DIR}")
-        print("=" * 60 + "\n")
-        
-        # To prevent Tkinter and OpenVINO threading deadlock, initialize on Main Thread
-        self.root.update()
-        
-        try:
-            # Always keep one root-level reference cache. Folder changes can then
-            # be applied instantly instead of destroying and rebuilding the AI.
-            self.matcher = TemplateMatcher(queries_dir=QUERIES_DIR, threshold=MATCH_THRESHOLD)
-            self._matcher_reference_cache = self.matcher.reference_images
-            self._matcher_query_image_cache = self.matcher.query_images
-            self._apply_matcher_query_selection()
-            self.query_collector = QueryAutoCollector(
-                QUERIES_DIR, self.matcher.ai_extractor
-            )
-            self.last_clipboard_hash = get_clipboard_image_hash()
-            self.poll_clipboard()
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print(f"\n❌ Lỗi khởi tạo AI: {str(e)}")
-            self.stop_marker()
+        def _init_ai_thread():
+            try:
+                # Reuse existing matcher to avoid recompiling OpenVINO models
+                existing_matcher = getattr(self, "matcher", None)
+                if existing_matcher is None:
+                    matcher = TemplateMatcher(queries_dir=QUERIES_DIR, threshold=MATCH_THRESHOLD)
+                else:
+                    matcher = existing_matcher
+                    matcher.reference_images.clear()
+                    matcher.query_images.clear()
+                    matcher.reference_timestamps.clear()
+                    matcher.query_thresholds.clear()
+                    matcher._load_references(QUERIES_DIR)
+                
+                def _on_init_complete():
+                    if not getattr(self, 'is_monitoring', False):
+                        return # Cancelled during init
+                    
+                    self.matcher = matcher
+                    self._matcher_reference_cache = self.matcher.reference_images
+                    self._matcher_query_image_cache = self.matcher.query_images
+                    self._apply_matcher_query_selection()
+                    
+                    if getattr(self, "query_collector", None) is None:
+                        self.query_collector = QueryAutoCollector(
+                            QUERIES_DIR, self.matcher.ai_extractor
+                        )
+                    self.last_clipboard_hash = get_clipboard_image_hash()
+                    
+                    self.lbl_status.configure(text="● ĐANG CHẠY", text_color="#2ECC71")
+                    self.poll_clipboard()
+                    
+                self.root.after(0, _on_init_complete)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(f"\n❌ Lỗi khởi tạo AI: {str(e)}")
+                self.root.after(0, self.stop_marker)
+
+        import threading
+        threading.Thread(target=_init_ai_thread, daemon=True).start()
 
     def stop_marker(self):
         self.is_monitoring = False

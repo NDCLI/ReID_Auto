@@ -2,63 +2,39 @@
 
 Tính năng OCR đọc thời gian trên ảnh để so sánh và chỉ vẽ khung khi cả tỉ lệ ảnh và thời gian đều khớp.
 
-## OCR chính cho ảnh crop nhỏ
+## Hai engine OCR
 
-Ứng dụng dùng **RapidOCR + OpenVINO CPU** làm OCR chính cho thời gian nhỏ ở
-đáy mỗi thẻ. RapidOCR chạy model ONNX cục bộ, không cần PyTorch và tránh các
-lỗi DLL thường gặp với EasyOCR. Khi chạy lần đầu, RapidOCR có thể tải model OCR
-vào cache của Python; không thêm cache model vào repository.
+Ứng dụng sử dụng **hai** engine OCR, không cần cài thêm phần mềm ngoài:
 
-Nếu RapidOCR không cài được hoặc không đọc được ảnh, ứng dụng tự fallback lần
-lượt sang Windows OCR rồi Tesseract. Crop không đọc được sẽ không làm hỏng quá
-trình matching và vẫn được AI đánh giá.
+| Engine | Vai trò | Ghi chú |
+|---|---|---|
+| **RapidOCR + OpenVINO** | OCR chính cho ảnh crop nhỏ & fallback cho screenshot | Model ONNX cục bộ, không cần PyTorch |
+| **Windows OCR (winocr)** | OCR chính cho full screenshot & fallback cho crop nhỏ | Engine WinRT tích hợp sẵn trên Windows 10/11 |
 
-Cài cùng các dependency của dự án:
+### Ảnh crop nhỏ (thẻ người ~78×187 px)
 
-```bash
-.venv\\Scripts\\activate
-pip install -r requirements.txt
-```
+1. **RapidOCR** — chạy consensus trên nhiều crop phóng to ở đáy thẻ.
+2. **Windows OCR** — fallback nếu RapidOCR không đọc được.
 
-## Cài đặt Tesseract OCR (Fallback)
+### Full screenshot (quét TIME filter ở góc trên-trái)
 
-### Bước 1: Tải và cài Tesseract cho Windows
+1. **Windows OCR** — đọc chữ trắng trên nền tối rất tốt.
+2. **RapidOCR** — fallback nếu Windows OCR không có hoặc không trả kết quả.
 
-1. **Tải Tesseract:**
-   - Truy cập: https://github.com/UB-Mannheim/tesseract/wiki
-   - Chọn phiên bản mới nhất: `tesseract-ocr-w64-setup-5.x.x.exe`
-   - Chạy file cài đặt và làm theo hướng dẫn
+## Cài đặt
 
-2. **Thêm Tesseract vào PATH:**
-   - Mặc định cài tại: `C:\Program Files\Tesseract-OCR`
-   - Thêm đường dẫn này vào biến môi trường PATH:
-     * Bấm `Windows + R`, gõ `sysdm.cpl` và Enter
-     * Chọn tab "Advanced" → "Environment Variables"
-     * Trong "System variables", tìm `Path` và bấm "Edit"
-     * Bấm "New" và thêm: `C:\Program Files\Tesseract-OCR`
-     * Bấm OK để lưu
-
-3. **Khởi động lại Command Prompt hoặc PowerShell** để áp dụng PATH mới
-
-### Bước 2: Cài thư viện Python
+Tất cả dependency đã nằm trong `requirements.txt`:
 
 ```bash
 .venv\Scripts\activate
-pip install pytesseract
+pip install -r requirements.txt
 ```
 
-### Bước 3: Kiểm tra cài đặt
-
-```bash
-tesseract --version
-```
-
-Nếu thấy phiên bản Tesseract (ví dụ: `tesseract 5.3.0`) thì đã cài thành công!
+Khi chạy lần đầu, RapidOCR có thể tải model OCR vào cache của Python; không thêm cache model vào repository.
 
 ## Bật tính năng OCR trong config.py
 
-RapidOCR được dùng tự động nếu đã cài từ `requirements.txt`. Tesseract chỉ là
-fallback. Sau khi cài các dependency, mở file `config.py` nếu cần kiểm tra:
+Mở file `config.py` nếu cần kiểm tra:
 
 ```python
 # Bật OCR
@@ -114,41 +90,34 @@ App sẽ hoạt động bình thường chỉ dựa vào tỉ lệ ảnh như tr
 
 ## Xử lý lỗi thường gặp
 
-### Lỗi: "pytesseract.pytesseract.TesseractNotFoundError"
-**Nguyên nhân:** Tesseract chưa được cài đặt hoặc chưa thêm vào PATH
-
-**Giải pháp:**
-1. Kiểm tra Tesseract đã cài chưa: mở CMD và gõ `tesseract --version`
-2. Nếu chưa cài, tải và cài từ link ở trên
-3. Nếu đã cài nhưng vẫn lỗi, thêm vào PATH theo hướng dẫn Bước 1.2
-4. Khởi động lại terminal/CMD sau khi thêm PATH
-5. Nếu vẫn không được, chỉ định đường dẫn trực tiếp trong code:
-   ```python
-   # Thêm vào đầu file ocr_utils.py
-   import pytesseract
-   pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-   ```
-
 ### OCR không đọc được thời gian
-**Giải pháp:** 
+**Giải pháp:**
 - Kiểm tra ảnh mẫu có hiển thị thời gian rõ ràng không
 - Kiểm tra ảnh mẫu và thẻ kết quả có hiển thị đúng giờ/phút không
 - Kiểm tra vùng hiển thị thời gian trên ảnh có bị che khuất không
 
-### Lỗi DLL với EasyOCR
-**Nguyên nhân:** EasyOCR phụ thuộc vào PyTorch có vấn đề DLL trên một số máy Windows
+### RapidOCR không khởi tạo được
+**Nguyên nhân:** OpenVINO chưa cài đúng hoặc thiếu DLL runtime
 
-**Giải pháp:** Dùng Tesseract thay vì EasyOCR (đã được cấu hình mặc định)
+**Giải pháp:**
+1. Đảm bảo đã cài `openvino` qua `pip install -r requirements.txt`
+2. Khởi động lại terminal sau khi cài
+
+### Windows OCR không hoạt động
+**Nguyên nhân:** Package `winocr` chưa cài hoặc hệ điều hành không hỗ trợ
+
+**Giải pháp:**
+- `winocr` yêu cầu Windows 10 1809+ hoặc Windows 11
+- Cài lại: `pip install winocr`
+- Nếu không dùng được, RapidOCR vẫn là engine chính cho crop nhỏ
 
 ## Performance
 
 - **RapidOCR/OpenVINO:** model OCR cục bộ, phù hợp hơn với chữ nhỏ trên thẻ.
-- **Windows OCR:** fallback cho crop mà RapidOCR không đọc được.
-- **Tesseract:** fallback cuối cùng, nhẹ nhưng kém ổn định hơn với chữ rất nhỏ.
+- **Windows OCR:** đọc rất tốt chữ trắng trên nền tối của giao diện Re-ID.
 - **Không ảnh hưởng:** Nếu tắt `ENABLE_OCR_TIMESTAMP_FILTER = False`, không có overhead.
 
 ## Lưu ý quan trọng
 
-- Tesseract cần **ảnh có độ phân giải cao và chữ rõ ràng** để đọc chính xác
 - Nếu ảnh chụp màn hình có chất lượng thấp hoặc chữ nhỏ, OCR có thể đọc sai
 - Trong trường hợp đó, kiểm tra lại OCR hoặc tắt tính năng OCR nếu cần

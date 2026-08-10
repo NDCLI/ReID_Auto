@@ -6,28 +6,20 @@ that clipboard images match the reference screenshot's time period.
 
 Strategy:
   - Full screenshots: scan the TOP 20% using Windows OCR (winocr) first,
-    falling back to Tesseract. This reads the TIME filter/date range.
+    falling back to RapidOCR. This reads the TIME filter/date range.
   - Small reference images (~78x187 person crops): use RapidOCR with the
-    OpenVINO CPU backend on enlarged bottom crops, then Windows OCR and
-    Tesseract as fallbacks. Multiple RapidOCR variants vote on the timestamp.
+    OpenVINO CPU backend on enlarged bottom crops, then Windows OCR as
+    fallback. Multiple RapidOCR variants vote on the timestamp.
   - Compare extracted values between reference and clipboard screenshots.
 """
 
 import asyncio
 import os
 import re
+import threading
 import cv2
 import numpy as np
 from typing import Optional, Tuple
-
-# Auto-configure Tesseract path on Windows
-_TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-if os.path.exists(_TESSERACT_PATH):
-    try:
-        import pytesseract
-        pytesseract.pytesseract.tesseract_cmd = _TESSERACT_PATH
-    except ImportError:
-        pass
 
 # Check for Windows OCR availability
 _WINOCR_AVAILABLE = False
@@ -42,6 +34,7 @@ except ImportError:
 # when OCR filtering is disabled.
 _RAPIDOCR_AVAILABLE = None
 _RAPIDOCR_ENGINE = None
+_RAPIDOCR_LOCK = threading.Lock()
 
 # Month name mapping
 _MONTH_MAP = {
@@ -78,7 +71,7 @@ def _winocr_bottom(image_bgr: np.ndarray, bottom_pct: float = 0.25,
     """Run Windows OCR (WinRT) on the bottom portion of a small image.
 
     This is the same OCR engine that Windows 11 Photos uses. It reads
-    overlay text on small person crops (~78x187px) that Tesseract cannot.
+    overlay text on small person crops (~78x187px) reliably.
 
     Args:
         image_bgr: BGR image (small person crop).
@@ -197,21 +190,33 @@ def _rapidocr_variants(image_bgr: np.ndarray):
 
 
 def _rapidocr_timestamp(image_bgr: np.ndarray) -> Optional[str]:
-    """Extract a timestamp with RapidOCR using consensus across crop variants."""
+    """Extract a timestamp with RapidOCR using consensus across crop variants.
+    
+    Uses a lock for thread safety and exits early when the first crop
+    variant returns a high-confidence result, skipping remaining variants
+    to save ~200-300 ms per card.
+    """
     engine = _get_rapidocr_engine()
     if engine is None:
         return None
 
     votes = {}
     for variant in _rapidocr_variants(image_bgr):
-        try:
-            result = engine(variant)
-        except (OSError, RuntimeError, ValueError, TypeError):
-            continue
+        with _RAPIDOCR_LOCK:
+            try:
+                result = engine(variant)
+            except (OSError, RuntimeError, ValueError, TypeError):
+                continue
         for text, confidence in _rapidocr_result_items(result):
             timestamp = _parse_time_ampm(text)
             if timestamp:
                 votes.setdefault(timestamp, []).append(confidence)
+        # Early exit: high-confidence timestamp found — skip remaining
+        # variants to save ~200-300 ms per card.
+        if votes:
+            best_conf = max(c for confs in votes.values() for c in confs)
+            if best_conf >= 0.7:
+                break
 
     if not votes:
         return None
@@ -229,9 +234,8 @@ def extract_reference_timestamp(image_bgr: np.ndarray) -> Optional[str]:
     """Extract a time like '7:42 AM' from a small reference person crop.
 
     RapidOCR with the OpenVINO CPU backend is preferred for tiny text and uses
-    consensus across
-    several enlarged crops. Windows OCR and Tesseract remain fallbacks so OCR
-    stays optional and an unreadable crop never breaks matching.
+    consensus across several enlarged crops. Windows OCR is the fallback so
+    OCR stays optional and an unreadable crop never breaks matching.
 
     Args:
         image_bgr: BGR image (small person crop, ~78x187px).
@@ -254,33 +258,6 @@ def extract_reference_timestamp(image_bgr: np.ndarray) -> Optional[str]:
                     if time_str:
                         return time_str
 
-    # --- Strategy 3: Tesseract fallback ---
-    try:
-        import pytesseract
-    except ImportError:
-        return None
-
-    h, w = image_bgr.shape[:2]
-    bottom = image_bgr[int(h * 0.75):, :]
-    bh, bw = bottom.shape[:2]
-    if bh < 2 or bw < 2:
-        return None
-
-    for scale in [12, 16]:
-        scaled = cv2.resize(bottom, (bw * scale, bh * scale),
-                            interpolation=cv2.INTER_LANCZOS4)
-        gray = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
-        for processed in [gray, cv2.bitwise_not(gray)]:
-            for psm in [6, 7]:
-                try:
-                    text = pytesseract.image_to_string(
-                        processed, config=f'--psm {psm} --oem 3').strip()
-                    if text:
-                        ts = _parse_time_ampm(text)
-                        if ts:
-                            return ts
-                except Exception:
-                    pass
     return None
 
 
@@ -331,14 +308,11 @@ def _winocr_region(image_bgr: np.ndarray, y_start: float, y_end: float,
 def _winocr_screenshot(image_bgr: np.ndarray) -> str:
     """Run Windows OCR on the top portion of a full Re-ID screenshot.
 
-    Scans two regions where timestamps appear in the Re-ID UI:
+    Scans two regions in parallel using asyncio.gather:
       1. Top-left panel (0-30% width, 0-20% height): TIME filter with
          date range like "Aug 3-4" and time range like "7:00 AM - 12:00 PM"
       2. Top-right area (30-100% width, 0-20% height): Result card
          headers that may show timestamps
-
-    Windows OCR handles white text on dark background much better than
-    Tesseract, which is critical for the Re-ID UI's dark theme.
 
     Returns:
         Combined OCR text from both regions.
@@ -346,43 +320,70 @@ def _winocr_screenshot(image_bgr: np.ndarray) -> str:
     if not _WINOCR_AVAILABLE:
         return ""
 
-    texts = []
+    h, w = image_bgr.shape[:2]
 
-    # Region 1: top-left panel (TIME filter + date range)
-    # Use higher scale (4x) for this smaller region with critical data
-    t1 = _winocr_region(image_bgr, 0.0, 0.20, 0.0, 0.30, scale=4)
-    if t1:
-        texts.append(t1)
+    # Prepare Region 1: top-left panel (4x scale)
+    y1_end = min(int(h * 0.20), h)
+    x1_end = min(int(w * 0.30), w)
+    roi1 = image_bgr[0:y1_end, 0:x1_end]
+    rh1, rw1 = roi1.shape[:2]
+    scaled1 = (cv2.resize(roi1, (rw1 * 4, rh1 * 4),
+               interpolation=cv2.INTER_LANCZOS4)
+               if rh1 >= 2 and rw1 >= 2 else None)
 
-    # Region 2: top-right header area (result cards may show times)
-    t2 = _winocr_region(image_bgr, 0.0, 0.20, 0.30, 1.0, scale=3)
-    if t2:
-        texts.append(t2)
+    # Prepare Region 2: top-right header (3x scale)
+    roi2 = image_bgr[0:y1_end, x1_end:w]
+    rh2, rw2 = roi2.shape[:2]
+    scaled2 = (cv2.resize(roi2, (rw2 * 3, rh2 * 3),
+               interpolation=cv2.INTER_LANCZOS4)
+               if rh2 >= 2 and rw2 >= 2 else None)
 
-    return "\n".join(texts)
+    if scaled1 is None and scaled2 is None:
+        return ""
+
+    async def _ocr_both():
+        tasks = []
+        if scaled1 is not None:
+            tasks.append(_winocr_recognize(scaled1, 'en'))
+        if scaled2 is not None:
+            tasks.append(_winocr_recognize(scaled2, 'en'))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        texts = []
+        for r in results:
+            if isinstance(r, Exception):
+                continue
+            if r and r.text and r.text.strip():
+                texts.append(r.text.strip())
+        return "\n".join(texts)
+
+    try:
+        return _run_async(_ocr_both())
+    except Exception:
+        return ""
 
 
 # ============================================================
-# Tesseract OCR for full screenshots
+# RapidOCR for full screenshots (fallback when WinOCR unavailable)
 # ============================================================
 
-def _ocr_top20(image_bgr: np.ndarray) -> str:
-    """Run OCR on the top 20% of the image (left 30% panel area).
+def _rapidocr_screenshot(image_bgr: np.ndarray) -> str:
+    """Run RapidOCR on the top 20% of a full Re-ID screenshot.
 
     The Re-ID UI shows the TIME filter in the top-left panel.
-    Scale up 4x and invert (dark UI) for better Tesseract accuracy.
+    Scale up and invert (dark UI) for better accuracy.
 
     Returns:
-        Combined OCR text from the top-20% region.
+        Combined OCR text from the top-20% region, or "".
     """
-    try:
-        import pytesseract
-    except ImportError:
+    engine = _get_rapidocr_engine()
+    if engine is None:
         return ""
 
     h, w = image_bgr.shape[:2]
     top20_h = max(int(h * 0.20), 1)
     left30_w = max(int(w * 0.30), 1)
+
+    texts = []
 
     # Region 1: top-left panel (TIME filter + date range)
     roi_left = image_bgr[0:top20_h, 0:left30_w]
@@ -390,14 +391,15 @@ def _ocr_top20(image_bgr: np.ndarray) -> str:
     scaled = cv2.resize(gray, (gray.shape[1] * 4, gray.shape[0] * 4),
                         interpolation=cv2.INTER_CUBIC)
     inverted = cv2.bitwise_not(scaled)
-
-    texts = []
-    try:
-        t = pytesseract.image_to_string(inverted, config='--psm 6 --oem 3')
-        if t.strip():
-            texts.append(t.strip())
-    except Exception:
-        pass
+    with _RAPIDOCR_LOCK:
+        try:
+            result = engine(inverted)
+        except (OSError, RuntimeError, ValueError, TypeError):
+            result = None
+    if result is not None:
+        for text, _conf in _rapidocr_result_items(result):
+            if text.strip():
+                texts.append(text.strip())
 
     # Region 2: top-right header area (result cards may show times)
     roi_right = image_bgr[0:top20_h, left30_w:w]
@@ -405,12 +407,15 @@ def _ocr_top20(image_bgr: np.ndarray) -> str:
     scaled2 = cv2.resize(gray2, (gray2.shape[1] * 3, gray2.shape[0] * 3),
                          interpolation=cv2.INTER_CUBIC)
     inv2 = cv2.bitwise_not(scaled2)
-    try:
-        t2 = pytesseract.image_to_string(inv2, config='--psm 6 --oem 3')
-        if t2.strip():
-            texts.append(t2.strip())
-    except Exception:
-        pass
+    with _RAPIDOCR_LOCK:
+        try:
+            result2 = engine(inv2)
+        except (OSError, RuntimeError, ValueError, TypeError):
+            result2 = None
+    if result2 is not None:
+        for text, _conf in _rapidocr_result_items(result2):
+            if text.strip():
+                texts.append(text.strip())
 
     return "\n".join(texts)
 
@@ -519,7 +524,7 @@ def _parse_time_24h(text: str) -> Optional[str]:
 # Public API
 # ============================================================
 
-def extract_timestamp(image_bgr: np.ndarray, method: str = 'tesseract') -> Optional[str]:
+def extract_timestamp(image_bgr: np.ndarray, method: str = 'winocr') -> Optional[str]:
     """Extract date/time info from the top 20% of a Re-ID screenshot.
 
     Looks for:
@@ -528,13 +533,12 @@ def extract_timestamp(image_bgr: np.ndarray, method: str = 'tesseract') -> Optio
       3. 24h times: "14:30:25"
 
     Uses Windows OCR (winocr) first when available — it handles the
-    dark-themed Re-ID UI (white text on dark background) much better
-    than Tesseract.  Falls back to Tesseract if winocr is unavailable
-    or returns nothing.
+    dark-themed Re-ID UI (white text on dark background) well.
+    Falls back to RapidOCR if winocr is unavailable or returns nothing.
 
     Args:
         image_bgr: BGR image (full screenshot)
-        method: OCR backend hint ('tesseract' or 'winocr').
+        method: OCR backend hint ('winocr' or 'rapidocr').
                 When winocr is available it is always tried first
                 regardless of this setting.
 
@@ -549,8 +553,8 @@ def extract_timestamp(image_bgr: np.ndarray, method: str = 'tesseract') -> Optio
             if result:
                 return result
 
-    # --- Strategy 2: Tesseract fallback ---
-    text = _ocr_top20(image_bgr)
+    # --- Strategy 2: RapidOCR fallback ---
+    text = _rapidocr_screenshot(image_bgr)
     if text:
         result = _parse_from_text(text)
         if result:
