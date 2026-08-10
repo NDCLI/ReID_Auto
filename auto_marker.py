@@ -797,19 +797,21 @@ class TemplateMatcher:
         """
         # Extract timestamp from screenshot for comparison
         screenshot_timestamp = None
-        if ENABLE_OCR_TIMESTAMP_FILTER:
-            import time as _time_ocr
-            _t_ocr = _time_ocr.time()
-            try:
-                screenshot_timestamp = extract_timestamp(screenshot_bgr, method=OCR_METHOD)
-                if screenshot_timestamp:
-                    log("OCR", f"Screenshot timestamp: {screenshot_timestamp} "
-                        f"({_time_ocr.time()-_t_ocr:.1f}s)")
-                else:
-                    log("OCR", f"No timestamp found in screenshot "
-                        f"({_time_ocr.time()-_t_ocr:.1f}s)")
-            except Exception as e:
-                log("OCR", f"Screenshot timestamp extraction failed: {e}")
+        # DISABLED: Tạm tắt việc quét thời gian ở góc trái/phải trên cùng 
+        # (tiết kiệm ~0.8 giây) vì user báo không cần lọc thời gian tổng của UI.
+        # if ENABLE_OCR_TIMESTAMP_FILTER:
+        #     import time as _time_ocr
+        #     _t_ocr = _time_ocr.time()
+        #     try:
+        #         screenshot_timestamp = extract_timestamp(screenshot_bgr, method=OCR_METHOD)
+        #         if screenshot_timestamp:
+        #             log("OCR", f"Screenshot timestamp: {screenshot_timestamp} "
+        #                 f"({_time_ocr.time()-_t_ocr:.1f}s)")
+        #         else:
+        #             log("OCR", f"No timestamp found in screenshot "
+        #                 f"({_time_ocr.time()-_t_ocr:.1f}s)")
+        #     except Exception as e:
+        #         log("OCR", f"Screenshot timestamp extraction failed: {e}")
 
         # --- EARLY TIMESTAMP FILTER ---
         # Temporarily hide Query folders whose reference timestamps don't
