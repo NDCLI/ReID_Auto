@@ -439,8 +439,14 @@ class AutoMarkerApp:
             font=("Segoe UI", 10, "bold"),
         ).pack(side=tk.LEFT)
 
+        log_frame = tk.Frame(content, bg="#1E272C")
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        
+        scrollbar = tk.Scrollbar(log_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
         self.txt_logs = tk.Text(
-            content,
+            log_frame,
             bg="#1E272C",
             fg="#ECF0F1",
             insertbackground="#ECF0F1",
@@ -450,8 +456,11 @@ class AutoMarkerApp:
             padx=6,
             pady=4,
             wrap="word",
+            yscrollcommand=scrollbar.set,
+            state="disabled"
         )
-        self.txt_logs.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        self.txt_logs.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.txt_logs.yview)
 
         # Control bar (bottom of content) — single row: BẬT/TẮT + query picker
         controls = ctk.CTkFrame(content, fg_color="transparent")
@@ -1053,10 +1062,13 @@ class AutoMarkerApp:
 
     def process_logs(self):
         """Consume logs from the queue and write to the text widget (thread-safe)."""
-        while not self.log_queue.empty():
-            msg = self.log_queue.get()
-            self.txt_logs.insert(tk.END, msg)
+        if not self.log_queue.empty():
+            self.txt_logs.configure(state="normal")
+            while not self.log_queue.empty():
+                msg = self.log_queue.get()
+                self.txt_logs.insert(tk.END, msg)
             self.txt_logs.see(tk.END)
+            self.txt_logs.configure(state="disabled")
         self.root.after(100, self.process_logs)
 
     def setup_tray(self):
