@@ -1930,8 +1930,7 @@ def main():
         print("    │   └── result_1.jpg")
         print("    └── ...")
         print()
-        print("  TIP: Use crop_tool.py to crop images from screenshots")
-        print("       python crop_tool.py <image_path> <query_name>")
+        print("  TIP: Add reference images under queries/<Query_n>/ and rerun.")
         print()
         sys.exit(1)
 
