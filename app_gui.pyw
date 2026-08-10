@@ -799,7 +799,9 @@ class AutoMarkerApp:
 
         def on_close():
             self.active_preview_window = None
+            self.root.deiconify()
 
+        self.root.withdraw()
         self.active_preview_window = LibraryWindow(
             self.root, OUTPUT_DIR, on_close=on_close
         )
