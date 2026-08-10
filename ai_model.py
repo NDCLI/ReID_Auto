@@ -3,10 +3,21 @@
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
+
+
+_OV_CORE = None
+
+def _get_ov_core():
+    global _OV_CORE
+    if _OV_CORE is None:
+        import openvino as ov
+        _OV_CORE = ov.Core()
+    return _OV_CORE
 
 
 @dataclass(frozen=True)
@@ -20,7 +31,6 @@ class ModelSpec:
 
 class _OpenVINOEmbeddingModel:
     def __init__(self, spec: ModelSpec, base_dir: str):
-        import openvino as ov
 
         self.spec = spec
         model_path = self._resolve(base_dir, spec.model)
@@ -29,11 +39,12 @@ class _OpenVINOEmbeddingModel:
             raise FileNotFoundError(model_path)
         self.resolved_path = model_path
 
-        core = ov.Core()
+        core = _get_ov_core()
         model = core.read_model(model=model_path, weights=weights_path)
         self.compiled_model = core.compile_model(model=model, device_name=spec.device)
         self.infer_request = self.compiled_model.create_infer_request()
         self.input_layer = self.compiled_model.input(0)
+        self._lock = threading.Lock()
 
         shape = list(self.input_layer.shape)
         if len(shape) != 4 or any(int(x) <= 0 for x in shape):
@@ -73,8 +84,9 @@ class _OpenVINOEmbeddingModel:
         if self.nchw:
             blob = blob.transpose(2, 0, 1)
         blob = np.expand_dims(blob, axis=0)
-        self.infer_request.infer([blob])
-        feature = self.infer_request.get_output_tensor(0).data.copy().reshape(-1).astype(np.float32)
+        with self._lock:
+            self.infer_request.infer([blob])
+            feature = self.infer_request.get_output_tensor(0).data.copy().reshape(-1).astype(np.float32)
         return feature / (np.linalg.norm(feature) + 1e-12)
 
 
@@ -176,7 +188,6 @@ class _OpenVINOFaceModel:
     """Detect the strongest face and return its normalized identity embedding."""
 
     def __init__(self, detector_path: str, recognizer_path: str, base_dir: str) -> None:
-        import openvino as ov
 
         detector_path = _OpenVINOEmbeddingModel._resolve(base_dir, detector_path)
         recognizer_path = _OpenVINOEmbeddingModel._resolve(base_dir, recognizer_path)
@@ -185,9 +196,11 @@ class _OpenVINOFaceModel:
         if not os.path.isfile(recognizer_path):
             raise FileNotFoundError(recognizer_path)
 
-        core = ov.Core()
+        core = _get_ov_core()
         self.detector = core.compile_model(detector_path, "AUTO")
         self.recognizer = core.compile_model(recognizer_path, "AUTO")
+        self._det_lock = threading.Lock()
+        self._rec_lock = threading.Lock()
 
     def extract(self, img_bgr: np.ndarray) -> np.ndarray | None:
         from config import FACE_DETECTION_THRESHOLD
@@ -195,7 +208,8 @@ class _OpenVINOFaceModel:
         height, width = img_bgr.shape[:2]
         detector_input = cv2.resize(img_bgr, (300, 300), interpolation=cv2.INTER_LINEAR)
         detector_input = detector_input.transpose(2, 0, 1)[None].astype(np.float32)
-        detections = self.detector([detector_input])[self.detector.output(0)].reshape(-1, 7)
+        with self._det_lock:
+            detections = self.detector([detector_input])[self.detector.output(0)].reshape(-1, 7)
         valid = [row for row in detections if float(row[2]) >= FACE_DETECTION_THRESHOLD]
         if not valid:
             return None
@@ -211,6 +225,7 @@ class _OpenVINOFaceModel:
 
         recognizer_input = cv2.resize(face, (128, 128), interpolation=cv2.INTER_LINEAR)
         recognizer_input = recognizer_input.transpose(2, 0, 1)[None].astype(np.float32)
-        feature = self.recognizer([recognizer_input])[self.recognizer.output(0)]
+        with self._rec_lock:
+            feature = self.recognizer([recognizer_input])[self.recognizer.output(0)]
         feature = feature.reshape(-1).astype(np.float32)
         return feature / (np.linalg.norm(feature) + 1e-12)

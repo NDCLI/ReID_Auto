@@ -3,7 +3,7 @@
 ## ✅ Đã hoàn thành
 
 ### 1. Module OCR mới (`ocr_utils.py`)
-- ✓ Hỗ trợ cả Tesseract và EasyOCR
+- ✓ Hỗ trợ RapidOCR (OpenVINO) và Windows OCR (winocr)
 - ✓ Tự động tìm vùng chứa timestamp trên ảnh
 - ✓ Tiền xử lý ảnh (CLAHE, threshold, denoise)
 - ✓ Parse nhiều định dạng timestamp
@@ -26,20 +26,19 @@ OCR_METHOD = 'winocr'                 # Hint cho OCR toàn màn hình
 - ✓ `ocr_utils.py` - Module OCR chính
 - ✓ `OCR_SETUP.md` - Hướng dẫn cài đặt chi tiết
 - ✓ `test_ocr.py` - Test suite đầy đủ
-- ✓ `test_easyocr_simple.py` - Test EasyOCR đơn giản
 
 ### 5. Tài liệu
 - ✓ README.md cập nhật với tính năng mới
-- ✓ Hướng dẫn cài đặt Tesseract
+- ✓ Hướng dẫn cài đặt OCR
 - ✓ Hướng dẫn xử lý lỗi
 
 ## 📋 Hướng dẫn sử dụng
 
-### Bước 1: Cài Tesseract
-1. Tải: https://github.com/UB-Mannheim/tesseract/wiki
-2. Cài đặt vào `C:\Program Files\Tesseract-OCR`
-3. Thêm vào PATH
-4. Khởi động lại terminal
+### Bước 1: Cài dependency
+```bash
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
 
 ### Bước 2: Bật tính năng
 Trong `config.py`:
@@ -113,10 +112,9 @@ Chạy test để kiểm tra:
 
 ## 📝 Lưu ý
 
-- Tesseract cần **ảnh rõ nét** để đọc chính xác
 - Timestamp phải **hiển thị rõ ràng** trên ảnh
 - Nếu OCR không hoạt động, app vẫn dùng phương pháp cũ (chỉ so sánh hình ảnh)
-- PyTorch (EasyOCR) có vấn đề DLL trên Windows, khuyên dùng Tesseract
+- RapidOCR dùng OpenVINO CPU backend — cùng runtime với model ReID
 
 ## 🚀 Tiếp theo
 

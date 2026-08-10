@@ -95,7 +95,7 @@ AI_REQUIRE_MODEL_AGREEMENT = True
 # AI ensemble and a per-query calibrated threshold reject uncertain crops.
 AUTO_CALIBRATION = True
 AUTO_PIXEL_THRESHOLD = 0.86
-AUTO_AI_THRESHOLD_FLOOR = 0.55
+AUTO_AI_THRESHOLD_FLOOR = 0.65
 AUTO_AI_THRESHOLD_CEILING = 0.90
 AUTO_AI_THRESHOLD_TOLERANCE = 0.05
 MAX_PIXEL_CANDIDATES = 150
@@ -169,7 +169,7 @@ IGNORE_BOTTOM_RATIO = 0.35
 # Enable OCR-based timestamp verification
 # When enabled, matches are filtered by comparing timestamps extracted from
 # reference images and clipboard screenshots
-ENABLE_OCR_TIMESTAMP_FILTER = True  # Tesseract installed at C:\Program Files\Tesseract-OCR
+ENABLE_OCR_TIMESTAMP_FILTER = True
 
 # Tolerance in minutes for timestamp matching.
 # The Re-ID UI prints only hours and minutes on each card, so a genuine repeat
@@ -177,8 +177,8 @@ ENABLE_OCR_TIMESTAMP_FILTER = True  # Tesseract installed at C:\Program Files\Te
 # time must equal a reference time exactly; any drift is a different sighting.
 OCR_TIMESTAMP_TOLERANCE = 0
 
-# OCR method for full screenshots: 'winocr' (recommended) or 'tesseract'
+# OCR method for full screenshots: 'winocr' (recommended) or 'rapidocr'
 # Windows OCR (winocr) reads white-on-dark text in Re-ID UI much better.
-# Small reference images always use Windows OCR (winocr) for accuracy.
+# Small reference images always use RapidOCR first, then Windows OCR.
 # When winocr is available it is always tried first regardless of this setting.
 OCR_METHOD = 'winocr'
