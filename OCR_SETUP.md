@@ -2,7 +2,25 @@
 
 Tính năng OCR đọc thời gian trên ảnh để so sánh và chỉ vẽ khung khi cả tỉ lệ ảnh và thời gian đều khớp.
 
-## Cài đặt Tesseract OCR (Khuyên dùng)
+## OCR chính cho ảnh crop nhỏ
+
+Ứng dụng dùng **RapidOCR + OpenVINO CPU** làm OCR chính cho thời gian nhỏ ở
+đáy mỗi thẻ. RapidOCR chạy model ONNX cục bộ, không cần PyTorch và tránh các
+lỗi DLL thường gặp với EasyOCR. Khi chạy lần đầu, RapidOCR có thể tải model OCR
+vào cache của Python; không thêm cache model vào repository.
+
+Nếu RapidOCR không cài được hoặc không đọc được ảnh, ứng dụng tự fallback lần
+lượt sang Windows OCR rồi Tesseract. Crop không đọc được sẽ không làm hỏng quá
+trình matching và vẫn được AI đánh giá.
+
+Cài cùng các dependency của dự án:
+
+```bash
+.venv\\Scripts\\activate
+pip install -r requirements.txt
+```
+
+## Cài đặt Tesseract OCR (Fallback)
 
 ### Bước 1: Tải và cài Tesseract cho Windows
 
@@ -39,28 +57,27 @@ Nếu thấy phiên bản Tesseract (ví dụ: `tesseract 5.3.0`) thì đã cài
 
 ## Bật tính năng OCR trong config.py
 
-Sau khi cài Tesseract xong, mở file `config.py` và thay đổi:
+RapidOCR được dùng tự động nếu đã cài từ `requirements.txt`. Tesseract chỉ là
+fallback. Sau khi cài các dependency, mở file `config.py` nếu cần kiểm tra:
 
 ```python
 # Bật OCR
 ENABLE_OCR_TIMESTAMP_FILTER = True  # Đổi từ False sang True
 
-# Độ dung sai thời gian (giây)
-OCR_TIMESTAMP_TOLERANCE = 5  # Cho phép chênh lệch tối đa 5 giây
+# Dung sai thời gian (phút). 0 = phải khớp đúng HH:MM
+OCR_TIMESTAMP_TOLERANCE = 0
 
-# Phương pháp OCR
-OCR_METHOD = 'tesseract'
+# Backend hint cho OCR toàn màn hình; crop nhỏ vẫn dùng RapidOCR trước
+OCR_METHOD = 'winocr'
 ```
 
 ## Cách hoạt động
 
-1. **Khi load ảnh mẫu:** App sẽ đọc thời gian từ ảnh đầu tiên trong mỗi thư mục Query
-2. **Khi nhận ảnh từ clipboard:** App sẽ:
-   - Đọc thời gian trên ảnh mới
-   - So sánh với thời gian của ảnh mẫu
-   - Chỉ vẽ khung nếu:
-     * Tỉ lệ ảnh giống nhau (như cũ)
-     * **VÀ** thời gian khớp nhau (trong khoảng dung sai 5 giây)
+1. **Khi load ảnh mẫu:** RapidOCR đọc thời gian ở từng ảnh crop trong thư mục Query.
+2. **Khi nhận ảnh từ clipboard:** App đọc thời gian ở từng thẻ kết quả rồi:
+   - So sánh khớp đúng HH:MM với các thời gian mẫu của Query tương ứng.
+   - Loại thẻ đọc được giờ khác mẫu; thẻ không đọc được vẫn để AI quyết định.
+   - Chỉ vẽ tối đa số mẫu trừ thẻ nguồn.
 
 ## Định dạng thời gian hỗ trợ
 
@@ -115,7 +132,7 @@ App sẽ hoạt động bình thường chỉ dựa vào tỉ lệ ảnh như tr
 ### OCR không đọc được thời gian
 **Giải pháp:** 
 - Kiểm tra ảnh mẫu có hiển thị thời gian rõ ràng không
-- Tăng `OCR_TIMESTAMP_TOLERANCE` lên 10-15 giây nếu thời gian chênh lệch nhiều
+- Kiểm tra ảnh mẫu và thẻ kết quả có hiển thị đúng giờ/phút không
 - Kiểm tra vùng hiển thị thời gian trên ảnh có bị che khuất không
 
 ### Lỗi DLL với EasyOCR
@@ -125,12 +142,13 @@ App sẽ hoạt động bình thường chỉ dựa vào tỉ lệ ảnh như tr
 
 ## Performance
 
-- **Tesseract:** ~50-100ms mỗi ảnh, nhẹ, ổn định
-- **EasyOCR:** ~200-500ms mỗi ảnh, chính xác hơn nhưng có vấn đề DLL trên Windows
-- **Không ảnh hưởng:** Nếu tắt `ENABLE_OCR_TIMESTAMP_FILTER = False`, không có overhead
+- **RapidOCR/OpenVINO:** model OCR cục bộ, phù hợp hơn với chữ nhỏ trên thẻ.
+- **Windows OCR:** fallback cho crop mà RapidOCR không đọc được.
+- **Tesseract:** fallback cuối cùng, nhẹ nhưng kém ổn định hơn với chữ rất nhỏ.
+- **Không ảnh hưởng:** Nếu tắt `ENABLE_OCR_TIMESTAMP_FILTER = False`, không có overhead.
 
 ## Lưu ý quan trọng
 
 - Tesseract cần **ảnh có độ phân giải cao và chữ rõ ràng** để đọc chính xác
 - Nếu ảnh chụp màn hình có chất lượng thấp hoặc chữ nhỏ, OCR có thể đọc sai
-- Trong trường hợp đó, tăng `OCR_TIMESTAMP_TOLERANCE` hoặc tắt tính năng OCR
+- Trong trường hợp đó, kiểm tra lại OCR hoặc tắt tính năng OCR nếu cần

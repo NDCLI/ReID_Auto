@@ -171,10 +171,11 @@ IGNORE_BOTTOM_RATIO = 0.35
 # reference images and clipboard screenshots
 ENABLE_OCR_TIMESTAMP_FILTER = True  # Tesseract installed at C:\Program Files\Tesseract-OCR
 
-# Tolerance in minutes for timestamp matching
-# Two timestamps are considered matching if they differ by at most this value
-# Reference images within this time window of the screenshot are kept
-OCR_TIMESTAMP_TOLERANCE = 5
+# Tolerance in minutes for timestamp matching.
+# The Re-ID UI prints only hours and minutes on each card, so a genuine repeat
+# of the same reference reads back as the exact same HH:MM. 0 means the card
+# time must equal a reference time exactly; any drift is a different sighting.
+OCR_TIMESTAMP_TOLERANCE = 0
 
 # OCR method for full screenshots: 'winocr' (recommended) or 'tesseract'
 # Windows OCR (winocr) reads white-on-dark text in Re-ID UI much better.

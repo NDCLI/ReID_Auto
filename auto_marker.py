@@ -584,6 +584,7 @@ class TemplateMatcher:
                 })
                 matches.append(classification)
 
+        matches = self._filter_matches_by_card_timestamp(matches, screenshot_bgr)
         matches = self._limit_and_align_matches(matches)
         log(
             "FAST",
@@ -593,7 +594,12 @@ class TemplateMatcher:
         return matches
 
     def _limit_and_align_matches(self, matches):
-        """Apply per-identity count limits and align boxes within each row."""
+        """Keep accepted detections within the exemplar-based safety cap.
+
+        The source card occupies one stored exemplar slot, so the cap is
+        ``reference_count - 1``. The score ordering keeps the strongest
+        independently accepted detections when more candidates are found.
+        """
         if LIMIT_MATCHES_BY_REFERENCE_COUNT and matches:
             limited = []
             for query_name in sorted({item["query"] for item in matches}):
@@ -634,6 +640,52 @@ class TemplateMatcher:
                 x1, _y1, x2, _y2 = item["bbox"]
                 item["bbox"] = (x1, aligned_y1, x2, aligned_y2)
         return matches
+
+    def _filter_matches_by_card_timestamp(self, matches, screenshot_bgr):
+        """Reject a match only when its own card time contradicts the query.
+
+        OCR is an extra precision gate, not a requirement: it removes a card
+        whose printed time is read confidently and matches no reference time
+        for that identity (a different-time stranger the AI mistook for the
+        same person). When the card time cannot be read, or the query has no
+        reference timestamps, the card is kept and the AI score decides.
+        """
+        if not (ENABLE_OCR_TIMESTAMP_FILTER and matches):
+            return matches
+
+        kept = []
+        for match in matches:
+            query_name = match.get("query")
+            ref_timestamps = self.reference_timestamps.get(query_name)
+            if not ref_timestamps:
+                kept.append(match)
+                continue
+
+            x1, y1, x2, y2 = match["bbox"]
+            crop = screenshot_bgr[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
+            if crop.shape[0] < 10 or crop.shape[1] < 10:
+                kept.append(match)
+                continue
+
+            card_ts = extract_reference_timestamp(crop)
+            if not card_ts:
+                # Unreadable time — do not reject, trust the AI score.
+                kept.append(match)
+                continue
+
+            if any(
+                timestamps_match(card_ts, ref_ts,
+                                 tolerance_minutes=OCR_TIMESTAMP_TOLERANCE)
+                for ref_ts in ref_timestamps
+            ):
+                kept.append(match)
+            else:
+                log(
+                    "OCR",
+                    f"Rejected {query_name} card at x={x1}: time {card_ts} "
+                    f"not in references {sorted(set(ref_timestamps))}",
+                )
+        return kept
 
     def _remove_source_grid_match(self, matches, screenshot_bgr):
         """Remove a match only when it overlaps the detected source card."""
@@ -854,52 +906,75 @@ class TemplateMatcher:
         screen_h, screen_w = gray_screen.shape[:2]
         scales = MATCH_SCALES
 
+        # --- CANDIDATE PROPOSAL ---
+        # When the regular result grid is detected, propose every card (minus
+        # the source card) and let the AI classifier decide. This removes the
+        # dependency on the pixel template gate, which silently dropped true
+        # cards whenever a stored reference crop was slightly mis-framed. The
+        # multi-scale template scan stays as the fallback for unknown layouts.
         all_matches = []
-        for query_name, refs in scan_refs.items():
-            if self.target_query is None and TEMPLATE_REFS_PER_QUERY > 0:
-                probe_refs = refs[:TEMPLATE_REFS_PER_QUERY]
-            else:
-                probe_refs = refs
+        grid_boxes = self._detect_result_grid(screenshot_bgr)
+        if grid_boxes:
+            for x1, y1, x2, y2 in grid_boxes[1:]:
+                if x1 < screen_w * IGNORE_LEFT_RATIO:
+                    continue
+                if y1 > screen_h * (1.0 - IGNORE_BOTTOM_RATIO):
+                    continue
+                all_matches.append({
+                    'bbox': (x1, y1, x2, y2),
+                    'pixel_score': 1.0,
+                    'score': 1.0,
+                    'scale': 1.0,
+                })
+            log("PERF", f"Grid proposal: {len(all_matches)} card(s) "
+                f"in {_time.time()-_t0:.1f}s")
 
-            for ref_name, ref_img, ref_feat in probe_refs:
-                ref_gray = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
-                ref_h, ref_w = ref_gray.shape[:2]
+        if not all_matches:
+            for query_name, refs in scan_refs.items():
+                if self.target_query is None and TEMPLATE_REFS_PER_QUERY > 0:
+                    probe_refs = refs[:TEMPLATE_REFS_PER_QUERY]
+                else:
+                    probe_refs = refs
 
-                for scale in scales:
-                    scaled_w = int(ref_w * scale)
-                    scaled_h = int(ref_h * scale)
+                for ref_name, ref_img, ref_feat in probe_refs:
+                    ref_gray = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
+                    ref_h, ref_w = ref_gray.shape[:2]
 
-                    if scaled_w < 15 or scaled_h < 15:
-                        continue
-                    if scaled_w >= screen_w or scaled_h >= screen_h:
-                        continue
+                    for scale in scales:
+                        scaled_w = int(ref_w * scale)
+                        scaled_h = int(ref_h * scale)
 
-                    resized_template = cv2.resize(ref_gray, (scaled_w, scaled_h))
-
-                    result = cv2.matchTemplate(
-                        gray_screen, resized_template, cv2.TM_CCOEFF_NORMED
-                    )
-
-                    local_max = result >= cv2.dilate(result, np.ones((3, 3), np.uint8))
-                    pixel_threshold = AUTO_PIXEL_THRESHOLD if AUTO_CALIBRATION else self.threshold
-                    loc = np.where((result >= pixel_threshold) & local_max)
-                    for pt in zip(*loc[::-1]):
-                        x, y = pt
-                        pixel_score = float(result[y, x])
-
-                        if x < screen_w * IGNORE_LEFT_RATIO:
+                        if scaled_w < 15 or scaled_h < 15:
                             continue
-                        if y > screen_h * (1.0 - IGNORE_BOTTOM_RATIO):
+                        if scaled_w >= screen_w or scaled_h >= screen_h:
                             continue
 
-                        all_matches.append({
-                            'source_query': query_name,
-                            'source_ref_name': ref_name,
-                            'bbox': (x, y, x + scaled_w, y + scaled_h),
-                            'pixel_score': pixel_score,
-                            'score': pixel_score,
-                            'scale': scale,
-                        })
+                        resized_template = cv2.resize(ref_gray, (scaled_w, scaled_h))
+
+                        result = cv2.matchTemplate(
+                            gray_screen, resized_template, cv2.TM_CCOEFF_NORMED
+                        )
+
+                        local_max = result >= cv2.dilate(result, np.ones((3, 3), np.uint8))
+                        pixel_threshold = AUTO_PIXEL_THRESHOLD if AUTO_CALIBRATION else self.threshold
+                        loc = np.where((result >= pixel_threshold) & local_max)
+                        for pt in zip(*loc[::-1]):
+                            x, y = pt
+                            pixel_score = float(result[y, x])
+
+                            if x < screen_w * IGNORE_LEFT_RATIO:
+                                continue
+                            if y > screen_h * (1.0 - IGNORE_BOTTOM_RATIO):
+                                continue
+
+                            all_matches.append({
+                                'source_query': query_name,
+                                'source_ref_name': ref_name,
+                                'bbox': (x, y, x + scaled_w, y + scaled_h),
+                                'pixel_score': pixel_score,
+                                'score': pixel_score,
+                                'scale': scale,
+                            })
 
         # --- NMS + AI classification on all candidates ---
         if all_matches:
@@ -912,7 +987,7 @@ class TemplateMatcher:
                 )[:MAX_PIXEL_CANDIDATES]
 
             _t1 = _time.time()
-            log("PERF", f"Template scan: {len(all_matches)} candidates "
+            log("PERF", f"Candidates: {len(all_matches)} "
                 f"in {_t1-_t0:.1f}s")
 
             verified_matches = []
@@ -955,58 +1030,17 @@ class TemplateMatcher:
             
             all_matches = self._remove_source_grid_match(all_matches, screenshot_bgr)
 
-        # A query folder contains the original image plus its expected results.
-        # Never draw more than (number of references - 1) boxes for an identity.
-        if LIMIT_MATCHES_BY_REFERENCE_COUNT and all_matches:
-            limited_matches = []
-            for query_name in sorted({m['query'] for m in all_matches}):
-                query_matches = [m for m in all_matches if m['query'] == query_name]
-                max_boxes = max(0, len(self.reference_images.get(query_name, [])) - 1)
-                query_matches.sort(
-                    key=lambda m: (m['score'], m.get('pixel_score', 0.0)),
-                    reverse=True,
-                )
-                if len(query_matches) > max_boxes:
-                    log(
-                        "LIMIT",
-                        f"{query_name}: keeping {max_boxes}/{len(query_matches)} "
-                        f"boxes from {len(self.reference_images.get(query_name, []))} refs",
-                    )
-                limited_matches.extend(query_matches[:max_boxes])
-            all_matches = limited_matches
+        # Extra precision gate: drop a card whose printed time is read
+        # confidently and matches no reference time for that identity.
+        all_matches = self._filter_matches_by_card_timestamp(all_matches, screenshot_bgr)
 
-        # AUTO-ALIGNMENT LOGIC: Make all boxes have the exact same height and align perfectly in rows
-        if all_matches:
-            # Group into rows based on y1
-            sorted_matches = sorted(all_matches, key=lambda m: m['bbox'][1])
-            rows_of_matches = []
-            current_row_matches = [sorted_matches[0]]
-            
-            for m in sorted_matches[1:]:
-                if m['bbox'][1] - current_row_matches[-1]['bbox'][1] < 50:
-                    current_row_matches.append(m)
-                else:
-                    rows_of_matches.append(current_row_matches)
-                    current_row_matches = [m]
-            rows_of_matches.append(current_row_matches)
-            
-            # Global median height
-            heights = [m['bbox'][3] - m['bbox'][1] for m in all_matches]
-            median_h = float(np.median(heights))
-            
-            for row_matches in rows_of_matches:
-                y_centers = [(m['bbox'][1] + m['bbox'][3]) / 2.0 for m in row_matches]
-                median_y_center = float(np.median(y_centers))
-                
-                aligned_y1 = int(median_y_center - median_h / 2.0)
-                aligned_y2 = int(median_y_center + median_h / 2.0)
-                
-                for m in row_matches:
-                    m['bbox'] = (m['bbox'][0], aligned_y1, m['bbox'][2], aligned_y2)
+        # The source card has already been removed above. Apply the shared
+        # post-source safety cap and align independently accepted result cards.
+        all_matches = self._limit_and_align_matches(all_matches)
 
-        # Timestamp filtering is already applied early in find_matches()
-        # (folders with mismatched timestamps are removed from reference_images
-        # before reaching this method), so no post-filter is needed here.
+        # Per-card timestamp filtering is applied above via
+        # _filter_matches_by_card_timestamp(); the early folder-level filter in
+        # find_matches() only narrows which folders are scanned.
 
         return all_matches
 
