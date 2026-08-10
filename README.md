@@ -10,34 +10,34 @@ Công cụ tự động hóa nhận diện nhân vật Re-ID và tự động v�
    * Tự động nhận diện khi bạn vừa chụp ảnh màn hình mới (hỗ trợ cả **Snipping Tool** và **ShareX**).
    * **Chống bắt nhầm ảnh rác**: Chỉ kích hoạt khi ảnh chụp màn hình chứa giao diện ứng dụng Re-ID (quét nhanh nhãn định vị `TIME` đa tỷ lệ). Tự động bỏ qua các ảnh copy từ trình duyệt web, Office, tệp tin cũ hoặc ứng dụng chat (Zalo, Messenger...).
 2. **OCR Timestamp Matching (MỚI)**:
-   * Đọc thời gian trên ảnh mẫu và ảnh clipboard bằng OCR.
+   * Trích xuất thời gian trên các ảnh thẻ kết quả nhỏ bằng RapidOCR.
    * Chỉ vẽ khung khi **CẢ** tỉ lệ ảnh **VÀ** thời gian đều khớp.
    * Tránh vẽ nhầm khung lên ảnh cùng người nhưng khác thời điểm.
    * Xem [OCR_SETUP.md](OCR_SETUP.md) để cài đặt và cấu hình.
-3. **Khớp nhân vật AI cục bộ**:
-   * Trích xuất đặc trưng (Feature Extraction) và tính toán khoảng cách cosine bằng mô hình AI cục bộ siêu tốc (ONNX/OpenVINO).
-   * Hỗ trợ tìm kiếm theo thư mục mẫu (Queries) được phân loại.
-3. **Vẽ khung thông minh (Dynamic Insets)**:
+3. **Khớp nhân vật AI cục bộ & Tối ưu siêu tốc**:
+   * Trích xuất đặc trưng (Feature Extraction) bằng mô hình AI (ONNX/OpenVINO).
+   * **Đa luồng (Multi-threading)**: Quét OCR và AI đồng thời giúp giảm thời gian xuống dưới 1 giây.
+   * **Fast-root**: Chế độ nhận diện lưới kết quả thông minh giúp quét siêu tốc ngay cả khi chọn "Tất cả" hay 1 thư mục riêng lẻ.
+   * **Caching & Background Init**: Tự động nạp model chạy ngầm, không làm đơ giao diện; sử dụng cache `.npz` và `.txt` để chuyển thư mục tức thì.
+4. **Vẽ khung thông minh (Dynamic Insets)**:
    * Tự động thụt lề `2px` ở các ảnh sát cạnh nhau để tránh dính khung đỏ (tạo khoảng hở `4px` trực quan).
    * Đối với ảnh to hoặc đơn lẻ, khung đỏ tự động bám khít `0px` vào mép ngoài của ảnh.
-4. **Bảng hiển thị nhanh OSD (On-Screen Display)**:
-   * Hiển thị trạng thái chuyển thư mục và bật/tắt dạng thẻ (capsule) bo góc tròn sẫm màu với viền xanh dương hiện đại ở góc trên màn hình.
+5. **Bảng hiển thị nhanh OSD (On-Screen Display)**:
+   * Hiển thị trạng thái chuyển thư mục và thông báo lỗi.
    * Ghi đè tức thời không trễ khi chuyển đổi nhanh liên tục.
-5. **Hệ thống phím tắt bên tay trái cực kỳ tiện lợi**:
+6. **Hệ thống phím tắt bên tay trái cực kỳ tiện lợi**:
    * `Ctrl + Shift + A`: Quay lại thư mục trước (Lùi).
    * `Ctrl + Shift + D`: Sang thư mục tiếp theo (Tiến).
    * `Ctrl + Shift + Q`: Trở về thư mục gốc (Tất cả).
    * `Ctrl + Shift + 1` đến `9`: Chọn nhanh thư mục con từ 1 đến 9.
-   * `Ctrl + Shift + Space` (Phím cách): **Tạm dừng / Tiếp tục** hoạt động của công cụ vẽ khung.
+   * `Ctrl + Shift + Space` (Phím cách): **Tạm dừng / Tiếp tục** quá trình tự động quét ảnh màn hình.
    * `Ctrl + Shift + N`: Chuyển nhanh sang Query trống kế tiếp khi tự thu thập ảnh mẫu.
-6. **Tối ưu hóa khay hệ thống (System Tray)**:
-   * Mặc định khởi động ẩn dưới System Tray để tránh làm phiền.
-   * Click chuột trái 1 lần hoặc click chuột phải: Hiện danh sách Menu chức năng (có tích hợp chọn nhanh thư mục).
-   * Click đúp chuột trái: Hiện cửa sổ cấu hình chính.
-   * Tích hợp tính năng **Khởi động lại nhanh** (Quick Restart) ngay trên menu.
-7. **Cửa sổ Review tiện dụng**:
+7. **Tối ưu hóa khay hệ thống (System Tray) & Tự động chạy**:
+   * Ứng dụng **tự động chạy và quét ngay lập tức** khi mở lên.
+   * Chạy ẩn gọn gàng dưới System Tray. Click đúp chuột trái để mở cấu hình chính.
+   * Click chuột trái 1 lần hoặc click phải để chọn nhanh thư mục mẫu.
+8. **Cửa sổ Review tiện dụng**:
    * Cho phép nhấn `Esc` để đóng/tắt nhanh cửa sổ Review kết quả.
-   * Cơ chế khóa luồng tránh việc kích hoạt trùng lặp nhiều cửa sổ khi chụp ảnh liên tục.
 
 ---
 
@@ -126,12 +126,9 @@ Kết quả được lưu theo từng Query trong
 `output/batch_YYYYMMDD_HHMMSS/Query_N/`. Ảnh không có khung khớp được đưa vào
 `Chua_xac_dinh/` để tiện kiểm tra lại.
 
-### Chế độ nhanh khi chọn toàn bộ thư mục Query
+### Chế độ lưới siêu tốc (Fast-Grid Mode)
 
-Khi chọn **Tất cả (Root queries folder)**, app nhận diện lưới kết quả một lần
-thay vì dò từng ảnh Query trên toàn màn hình. OSNet-LCT quét nhanh toàn bộ thẻ,
-sau đó ensemble đầy đủ (bao gồm TransReID) chỉ kiểm tra các thẻ có khả năng
-khớp. Nếu ảnh không có bố cục lưới hợp lệ, app tự quay về cách dò cũ.
+Khi ứng dụng phát hiện màn hình là dạng lưới (Grid) thẻ kết quả, tính năng tăng tốc sẽ tự động kích hoạt dù bạn chọn **Tất cả (Root)** hay **Từng Query riêng lẻ**. OSNet-LCT sẽ quét sơ bộ qua toàn bộ các thẻ, sau đó ensemble đầy đủ (bao gồm TransReID và FaceModel) chỉ kiểm tra lại những thẻ có khả năng khớp cao nhất. Điều này giúp giảm số lần chạy AI từ hàng chục lần xuống chỉ còn 1-3 lần, giúp vẽ khung gần như tức thời. Nếu ảnh không có bố cục lưới hợp lệ, app tự quay về cách dò tự do (quét toàn bộ).
 
 Ảnh đặt trực tiếp tại gốc `queries/` được coi là ảnh mẫu/test khi đã có các thư
 mục `Query_N`, nên không bị nạp nhầm thành một người truy vấn mới. Giới hạn số
