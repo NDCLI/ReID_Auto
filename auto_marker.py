@@ -478,30 +478,9 @@ class TemplateMatcher:
             log(
                 "REJECT",
                 f"Ảnh tham chiếu tốt nhất {best['best_reference_score']:.3f}"
-                f" < {AI_BEST_REFERENCE_THRESHOLD} — bỏ qua"
+                f"<{AI_BEST_REFERENCE_THRESHOLD:.3f}; loại ứng viên mơ hồ",
             )
             return face_result
-
-        # === KẾT HỢP LOGIC FACE & BODY ===
-        # Nếu trích xuất được khuôn mặt, BẮT BUỘC khuôn mặt cũng phải khớp với Body (NẾU ảnh mẫu có khuôn mặt để so sánh).
-        # Điều này giúp loại bỏ những người mặc đồng phục giống nhau (Body khớp cao nhưng Face là người khác).
-        if FACE_FEATURE_NAME in candidate_features:
-            # Kiểm tra xem ảnh mẫu của Query này có khuôn mặt nào để so sánh không
-            has_ref_face = any(
-                FACE_FEATURE_NAME in ref_features
-                for ref_name, _ref_img, ref_features in self.reference_images.get(best['query'], [])
-            )
-            if has_ref_face:
-                if not face_result:
-                    log("REJECT", f"Body khớp {best['query']} ({best['score']:.3f}) nhưng khuôn mặt lạ (dưới ngưỡng) -> Bỏ qua")
-                    return None
-                if face_result['query'] != best['query']:
-                    log("REJECT", f"Xung đột Face/Body: Body={best['query']}, Face={face_result['query']} -> Bỏ qua")
-                    return None
-                # Face và Body đồng thuận!
-                log("AI", f"Face & Body đồng thuận: {best['query']}")
-            else:
-                log("AI", f"Body khớp {best['query']} ({best['score']:.3f}), candidate có mặt nhưng ảnh mẫu KHÔNG CÓ mặt để so sánh -> Chấp nhận Body")
 
         if AI_REQUIRE_MODEL_AGREEMENT and len(per_model_winners) > 1:
             winners = []
@@ -744,6 +723,17 @@ class TemplateMatcher:
 
         kept = []
         
+        grid_boxes = self._detect_result_grid(screenshot_bgr)
+        source_ts = None
+        if grid_boxes:
+            sx1, sy1, sx2, sy2 = grid_boxes[0]
+            gray_for_snap = cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2GRAY)
+            scx1, scy1, scx2, scy2 = _snap_box_to_card(gray_for_snap, (sx1, sy1, sx2, sy2))
+            source_crop = screenshot_bgr[max(0, scy1):max(0, scy2), max(0, scx1):max(0, scx2)]
+            source_ts = extract_reference_timestamp(source_crop)
+            if source_ts:
+                log("OCR", f"Detected source query timestamp: {source_ts}")
+
         def process_match(match):
             query_name = match.get("query")
             ref_timestamps = self.reference_timestamps.get(query_name)
@@ -763,6 +753,15 @@ class TemplateMatcher:
             if not card_ts:
                 # Unreadable time — do not reject, trust the AI score.
                 return match, True
+
+            # Chỉ loại bỏ khi ảnh có mốc thời gian đó đang được dùng làm ảnh gốc (source query)
+            if source_ts and card_ts == source_ts:
+                log(
+                    "OCR",
+                    f"Rejected {query_name} card at x={x1}: time {card_ts} "
+                    f"trùng với ảnh gốc (đây là người khác đi qua cùng phút)."
+                )
+                return match, False
 
             if any(
                 timestamps_match(card_ts, ref_ts,
