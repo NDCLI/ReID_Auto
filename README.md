@@ -1,4 +1,4 @@
-# AutoMarker ReID (Snipping Tool Box Drawer)
+# AutoMarker Re-ID (Snipping Tool Box Drawer)
 
 Công cụ tự động hóa nhận diện nhân vật Re-ID và tự động vẽ khung đỏ từ ảnh chụp màn hình (Clipboard). Ứng dụng chạy ngầm ở khay hệ thống (System Tray), hoạt động mượt mà và tối ưu hóa cho thao tác bằng một tay.
 

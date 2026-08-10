@@ -13,7 +13,7 @@ import os
 # ============================================================
 # Everything user-visible or OS-global is namespaced so this build can be
 # installed and run next to the original ReID Auto Draw without collisions.
-APP_NAME = "AutoMarker ReID"
+APP_NAME = "AutoMarker Re-ID"
 APP_MUTEX_NAME = "Global\\ReID_Auto_Draw_OSNet_Mutex_Unique_5F2B71"
 MODEL_CACHE_DIRNAME = "ReIDAutoOSNet"
 

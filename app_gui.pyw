@@ -326,7 +326,7 @@ class AutoMarkerApp:
 
         lbl_title = ctk.CTkLabel(
             header,
-            text="📸 AUTOMARKER REID",
+            text="📸 AUTOMARKER RE-ID",
             font=("Segoe UI", 15, "bold"),
             text_color="#3498DB",
         )
