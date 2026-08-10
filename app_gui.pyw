@@ -372,20 +372,22 @@ class AutoMarkerApp:
         # widgets redraw their canvas on every <Configure> (window resize), so a
         # tree holding many CTkButton items makes dragging the window laggy.
         # Native tk items have no canvas redraw cost on resize.
-        tree_wrap = tk.Frame(sidebar, bg="#2C3C50", bd=0, highlightthickness=0)
+        # Use standard dark colors that match CTk's default dark theme
+        tree_bg = "#2B2B2B"
+        tree_wrap = tk.Frame(sidebar, bg=tree_bg, bd=0, highlightthickness=0)
         tree_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
         self.folder_tree = tk.Canvas(
-            tree_wrap, bg="#2C3E50", bd=0, highlightthickness=0
+            tree_wrap, bg=tree_bg, bd=0, highlightthickness=0
         )
-        tree_sb = ttk.Scrollbar(
-            tree_wrap, orient="vertical", command=self.folder_tree.yview
+        tree_sb = ctk.CTkScrollbar(
+            tree_wrap, orientation="vertical", command=self.folder_tree.yview
         )
         self.folder_tree.configure(yscrollcommand=tree_sb.set)
         tree_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.folder_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self._tree_inner = tk.Frame(self.folder_tree, bg="#2C3E50")
+        self._tree_inner = tk.Frame(self.folder_tree, bg=tree_bg)
         self._tree_window = self.folder_tree.create_window(
             (0, 0), window=self._tree_inner, anchor="nw"
         )
@@ -579,11 +581,11 @@ class AutoMarkerApp:
 
         active = os.path.basename(self.current_queries_dir)
         root_selected = self.current_queries_dir == QUERIES_DIR
-        hover_bg = "#2C3C50"
-        normal_bg = "#2C3E50"
-        selected_bg = "#1E272C"
-        normal_fg = "#BDC3C7"
-        selected_fg = "#3498DB"
+        hover_bg = "#3A3A3A"
+        normal_bg = "#2B2B2B"
+        selected_bg = "#1F538D"
+        normal_fg = "#DCE4EE"
+        selected_fg = "#FFFFFF"
 
         def make_item(text, selected, command):
             label = tk.Label(
