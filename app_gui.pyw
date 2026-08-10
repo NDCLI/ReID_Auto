@@ -476,7 +476,7 @@ class AutoMarkerApp:
             fg_color="#2ECC71",
             hover_color="#27AE60",
         )
-        self.btn_start.pack(side=tk.LEFT, padx=(0, 4))
+        # self.btn_start.pack(side=tk.LEFT, padx=(0, 4)) # Auto-start, hide button
 
         self.btn_stop = ctk.CTkButton(
             controls,
@@ -489,7 +489,7 @@ class AutoMarkerApp:
             fg_color="#E74C3C",
             hover_color="#C0392B",
         )
-        self.btn_stop.pack(side=tk.LEFT, padx=(0, 8))
+        # self.btn_stop.pack(side=tk.LEFT, padx=(0, 8)) # Auto-start, hide button
 
         self.cmb_capture_query = ctk.CTkOptionMenu(
             controls,
@@ -533,6 +533,9 @@ class AutoMarkerApp:
             self._resize_job = self.root.after(80, self.root.update_idletasks)
 
         self.root.bind("<Configure>", _on_root_configure, add="+")
+        
+        # Auto-start marker after GUI initialization
+        self.root.after(500, self.start_marker)
 
     def update_queries_dropdown(self):
         """Update the dropdown with subfolders in queries directory."""
