@@ -483,17 +483,25 @@ class TemplateMatcher:
             return face_result
 
         # === KẾT HỢP LOGIC FACE & BODY ===
-        # Nếu trích xuất được khuôn mặt, BẮT BUỘC khuôn mặt cũng phải khớp với Body.
+        # Nếu trích xuất được khuôn mặt, BẮT BUỘC khuôn mặt cũng phải khớp với Body (NẾU ảnh mẫu có khuôn mặt để so sánh).
         # Điều này giúp loại bỏ những người mặc đồng phục giống nhau (Body khớp cao nhưng Face là người khác).
         if FACE_FEATURE_NAME in candidate_features:
-            if not face_result:
-                log("REJECT", f"Body khớp {best['query']} ({best['score']:.3f}) nhưng khuôn mặt lạ (dưới ngưỡng) -> Bỏ qua")
-                return None
-            if face_result['query'] != best['query']:
-                log("REJECT", f"Xung đột Face/Body: Body={best['query']}, Face={face_result['query']} -> Bỏ qua")
-                return None
-            # Face và Body đồng thuận!
-            log("AI", f"Face & Body đồng thuận: {best['query']}")
+            # Kiểm tra xem ảnh mẫu của Query này có khuôn mặt nào để so sánh không
+            has_ref_face = any(
+                FACE_FEATURE_NAME in ref_features
+                for ref_name, _ref_img, ref_features in self.reference_images.get(best['query'], [])
+            )
+            if has_ref_face:
+                if not face_result:
+                    log("REJECT", f"Body khớp {best['query']} ({best['score']:.3f}) nhưng khuôn mặt lạ (dưới ngưỡng) -> Bỏ qua")
+                    return None
+                if face_result['query'] != best['query']:
+                    log("REJECT", f"Xung đột Face/Body: Body={best['query']}, Face={face_result['query']} -> Bỏ qua")
+                    return None
+                # Face và Body đồng thuận!
+                log("AI", f"Face & Body đồng thuận: {best['query']}")
+            else:
+                log("AI", f"Body khớp {best['query']} ({best['score']:.3f}), candidate có mặt nhưng ảnh mẫu KHÔNG CÓ mặt để so sánh -> Chấp nhận Body")
 
         if AI_REQUIRE_MODEL_AGREEMENT and len(per_model_winners) > 1:
             winners = []

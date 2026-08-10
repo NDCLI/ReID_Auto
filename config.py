@@ -72,7 +72,7 @@ FACE_RECOGNITION_MODEL = os.path.join("models", "face-reidentification-retail-00
 FACE_DETECTION_THRESHOLD = 0.75
 FACE_MATCH_THRESHOLD = 0.65
 FACE_MATCH_MARGIN = 0.20
-FACE_MIN_REFERENCES = 2
+FACE_MIN_REFERENCES = 1
 FACE_FEATURE_NAME = "face_0095"
 
 # Open-set decision policy. A result must be sufficiently similar and clearly
