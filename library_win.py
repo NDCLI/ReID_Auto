@@ -346,6 +346,8 @@ class LibraryWindow(ctk.CTkToplevel):
             messagebox.showerror("Lỗi", f"Không đọc được ảnh: {item['rel']}")
             return "break"
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        if self.matcher:
+            self.matcher.ignore_next_clipboard = True
         copy_image_to_clipboard(Image.fromarray(rgb))
         self.current_label.configure(
             text=f"Đã copy ảnh {self.current_index + 1}/{len(self.items)} — có thể dán vào Excel"
