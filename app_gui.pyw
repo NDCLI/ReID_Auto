@@ -761,12 +761,23 @@ class AutoMarkerApp:
             try:
                 valid_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp')
                 deleted_queries = 0
+                deleted_cache = 0
                 if os.path.isdir(self.current_queries_dir):
                     for root_dir, _dirs, files in os.walk(self.current_queries_dir):
                         for file in files:
                             if file.lower().endswith(valid_exts):
                                 os.remove(os.path.join(root_dir, file))
                                 deleted_queries += 1
+
+                    # Query folders recreate .cache/*.npz and *.ocr.txt for every
+                    # reference image. Deleting the images orphans those caches,
+                    # so remove every .cache subtree left behind.
+                    for root_dir, _dirs, files in os.walk(
+                        self.current_queries_dir, topdown=False
+                    ):
+                        if os.path.basename(root_dir) == ".cache":
+                            deleted_cache += len(files)
+                            shutil.rmtree(root_dir)
 
                 deleted_outputs = 0
                 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -781,7 +792,8 @@ class AutoMarkerApp:
 
                 messagebox.showinfo(
                     "Thành công",
-                    f"Đã xóa {deleted_queries} ảnh Query và "
+                    f"Đã xóa {deleted_queries} ảnh Query, "
+                    f"{deleted_cache} tệp cache OCR/feature và "
                     f"{deleted_outputs} tệp kết quả đã vẽ.",
                 )
             except (OSError, PermissionError, IOError) as e:
