@@ -1015,6 +1015,15 @@ class AutoMarkerApp:
         all_references.setdefault(query_name, []).append(
             (filename, image_bgr.copy(), result["features"])
         )
+        # Keep the OCR timestamp cache in sync too, so the running matcher sees
+        # the new image without reloading all three models. Non-path files are
+        # not refs: auto_marker treats missing/empty cache as "no timestamp".
+        ref_timestamps = self.matcher.reference_timestamps.setdefault(
+            query_name, []
+        )
+        ts = result.get("ocr_timestamp")
+        if ts:
+            ref_timestamps.append(ts)
         active_query = getattr(self.matcher, "target_query", None)
         if active_query is None or active_query == query_name:
             self.matcher._calibrate_query_thresholds()

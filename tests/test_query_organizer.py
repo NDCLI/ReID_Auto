@@ -1,5 +1,6 @@
 """Regression tests for automatic Query assignment."""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -57,6 +58,43 @@ class TestOrganizeScreenshot(unittest.TestCase):
             self.assertEqual(assigned, ["Query_1", "Query_2"])
             self.assertTrue(any((queries / "Query_1").iterdir()))
             self.assertTrue(any((queries / "Query_2").iterdir()))
+
+
+class TestAddCropWritesOcrCache(unittest.TestCase):
+    """A crop added via QueryAutoCollector must leave an OCR cache so the
+    running matcher can use its timestamp without a full reload."""
+
+    def test_add_crop_writes_ocr_cache_file(self):
+        import ocr_utils
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            queries_dir = os.path.join(temp_dir, "queries")
+            collector = query_organizer.QueryAutoCollector(
+                queries_dir, _RejectingExtractor()
+            )
+            rng = np.random.default_rng(42)
+            crop = rng.integers(0, 256, (220, 100, 3), dtype=np.uint8)
+            with (
+                patch.object(
+                    query_organizer,
+                    "ENABLE_OCR_TIMESTAMP_FILTER",
+                    True,
+                ),
+                patch.object(
+                    ocr_utils,
+                    "extract_reference_timestamp",
+                    return_value="7:42 AM",
+                ),
+            ):
+                result = collector.add_crop(crop, target_query="Query_1")
+
+            query_dir = os.path.join(queries_dir, "Query_1")
+            made = os.path.basename(result["path"])
+            cache_path = os.path.join(query_dir, ".cache", f"{made}.ocr.txt")
+            self.assertTrue(os.path.isfile(cache_path))
+            with open(cache_path, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read().strip(), "7:42 AM")
+            self.assertEqual(result["ocr_timestamp"], "7:42 AM")
 
 
 if __name__ == "__main__":
