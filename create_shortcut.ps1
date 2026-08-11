@@ -4,7 +4,7 @@ $appDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $appPath = Join-Path $appDirectory "app_gui.pyw"
 $iconPath = Join-Path $appDirectory "assets\app_icon.ico"
 $desktopDirectory = [Environment]::GetFolderPath("Desktop")
-$shortcutPath = Join-Path $desktopDirectory "RE-ID Auto Draw OSNet.lnk"
+$shortcutPath = Join-Path $desktopDirectory "AutoMarker Re-ID.lnk"
 
 $pythonExecutable = (& python -c "import sys; print(sys.executable)").Trim()
 $pythonwPath = Join-Path (Split-Path -Parent $pythonExecutable) "pythonw.exe"
