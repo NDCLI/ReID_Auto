@@ -320,6 +320,74 @@ class TestAcceptedMatchRetention(unittest.TestCase):
             )
         )
 
+    def test_fast_root_enforces_single_query_before_cap(self):
+        """A card classified under a secondary identity must not draw a box in
+        fast mode either — it would color blue and exceed the folder's N-1 cap.
+
+        Regression for the extra blue frame: the fast root classified each card
+        independently without the single-identity policy the full scan applies.
+        """
+        boxes = [
+            (index * 100, 10, index * 100 + 80, 196)
+            for index in range(20)
+        ]
+
+        class FakeFastExtractor:
+            models = {auto_marker.FAST_ROOT_PRIMARY_MODEL}
+            active_models = (auto_marker.FAST_ROOT_PRIMARY_MODEL,)
+            face_model = None
+
+            @staticmethod
+            def extract_feature(_crop, model_names=None):
+                return {name: np.ones(1) for name in (model_names or ())}
+
+        self.matcher.ai_extractor = FakeFastExtractor()
+        self.matcher._detect_result_grid = lambda _image: boxes
+        self.matcher._rank_features = lambda _features, _models: [
+            {"score": 0.9}
+        ]
+
+        from unittest.mock import patch
+
+        primary = {
+            "query": "Query_1",
+            "ref_name": "ref_0.png",
+            "score": 0.9,
+        }
+        intruder = {
+            "query": "Query_2",
+            "ref_name": "ref_0.png",
+            "score": 0.95,
+        }
+        # The intruder scores higher per card, but Query_1 wins by card count
+        # (counts decide in dominant_query_only). Both survive the per-card
+        # classifier, so a missing dominant_query_only step would keep the
+        # Query_2 card and draw it as a blue box past the folder cap.
+        self.matcher.reference_images = {
+            "Query_1": [(f"ref_{i}.png", None, {}) for i in range(6)],
+            "Query_2": [(f"ref_{i}.png", None, {}) for i in range(6)],
+        }
+        calls = {"n": 0}
+
+        def classify(features):
+            calls["n"] += 1
+            result = dict(intruder if calls["n"] == 1 else primary)
+            result["bbox"] = (calls["n"] * 100, 10, calls["n"] * 100 + 80, 196)
+            return result
+
+        self.matcher._classify_features = classify
+        with patch.object(auto_marker, "ENFORCE_SINGLE_QUERY", True):
+            result = self.matcher._find_matches_fast_root(
+                np.zeros((220, 2000, 3), dtype=np.uint8)
+            )
+
+        self.assertTrue(result)
+        self.assertTrue(
+            all(match["query"] == "Query_1" for match in result),
+            "secondary identity card must be dropped before the N-1 cap",
+        )
+        self.assertEqual(len(result), 5)
+
 
 # ---------------------------------------------------------------------------
 # Per-card OCR timestamp gate
