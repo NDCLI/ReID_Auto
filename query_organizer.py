@@ -12,7 +12,12 @@ import numpy as np
 
 from ai_model import AI_FeatureExtractor
 from auto_marker import read_image_file, write_image_file
-from config import FACE_MATCH_MARGIN, FACE_MATCH_THRESHOLD, FACE_MIN_REFERENCES
+from config import (
+    ENABLE_OCR_TIMESTAMP_FILTER,
+    FACE_MATCH_MARGIN,
+    FACE_MATCH_THRESHOLD,
+    FACE_MIN_REFERENCES,
+)
 
 
 VALID_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp")
@@ -85,6 +90,7 @@ class QueryAutoCollector:
         output_path = os.path.join(query_dir, f"capture_{timestamp}.png")
         if not write_image_file(output_path, image_bgr):
             raise IOError(f"Không thể lưu ảnh Query: {output_path}")
+        ocr_timestamp = _write_ocr_cache(output_path, image_bgr)
         self.identities[query_name].append(features)
         self.image_fingerprints.append((output_path, fingerprint))
 
@@ -96,7 +102,42 @@ class QueryAutoCollector:
             "path": output_path,
             "features": features,
             "match_source": match_source,
+            "ocr_timestamp": ocr_timestamp,
         }
+
+
+def _write_ocr_cache(image_path, image_bgr):
+    """OCR a newly added Query image immediately and cache the timestamp.
+
+    auto_marker loads ``.cache/<img>.ocr.txt`` when it scans a query folder, so
+    writing the timestamp here means a freshly added image is automatically
+    usable on the next reload without having to wait for OCR to run there.
+    Feature cache is intentionally left to auto_marker's own load pass.
+    """
+    if not ENABLE_OCR_TIMESTAMP_FILTER:
+        return None
+    from ocr_utils import extract_reference_timestamp
+
+    try:
+        ts = extract_reference_timestamp(image_bgr)
+    except Exception as e:  # OCR is best-effort; never block query capture
+        print(f"  [OCR] Lỗi OCR ảnh mới {os.path.basename(image_path)}: {e}")
+        return None
+    if not ts:
+        # Leave no cache file: auto_marker will retry OCR on next reload and
+        # could only ever read a stale "no time" from an empty file.
+        return None
+    cache_dir = os.path.join(os.path.dirname(image_path), ".cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    ocr_cache_path = os.path.join(
+        cache_dir, f"{os.path.basename(image_path)}.ocr.txt"
+    )
+    try:
+        with open(ocr_cache_path, "w", encoding="utf-8") as f:
+            f.write(ts)
+    except OSError as e:
+        print(f"  [OCR] Không ghi được cache {ocr_cache_path}: {e}")
+    return ts
 
 
 def _image_fingerprint(image_bgr):
@@ -383,7 +424,8 @@ def organize_screenshot(
         filename = f"auto_{timestamp}_{index:03d}.png"
         output_path = os.path.join(query_dir, filename)
         if not write_image_file(output_path, crop):
-            raise IOError(f"Kh?ng th? l?u ?nh Query: {output_path}")
+            raise IOError(f"Không thể lưu ảnh Query: {output_path}")
+        _write_ocr_cache(output_path, crop)
         identities[query_name].append(features)
         if created:
             # Recompute only after the first image exists; an empty newly-created

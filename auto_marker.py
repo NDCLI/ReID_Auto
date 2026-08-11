@@ -653,6 +653,10 @@ class TemplateMatcher:
                 matches.append(classification)
 
         matches = self._filter_matches_by_card_timestamp(matches, screenshot_bgr)
+        # Keep the same single-identity policy as the full scan so that cards
+        # of a secondary identity cannot exceed the per-folder N-1 cap.
+        if ENFORCE_SINGLE_QUERY:
+            matches = dominant_query_only(matches)
         matches = self._limit_and_align_matches(matches)
         log(
             "FAST",
