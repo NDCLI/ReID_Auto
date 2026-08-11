@@ -37,7 +37,8 @@ from config import (
     CLICK_BOX_MIN_SIZE,
     IGNORE_LEFT_RATIO, IGNORE_BOTTOM_RATIO, AI_MATCH_THRESHOLD,
     AI_MATCH_MARGIN, AI_BEST_REFERENCE_THRESHOLD, AI_TOP_K_REFERENCES,
-    AI_REQUIRE_MODEL_AGREEMENT,
+    AI_REQUIRE_MODEL_AGREEMENT, AI_TIME_RESCUE_SCORE_FLOOR,
+    AI_TIME_RESCUE_MARGIN,
     ENFORCE_SINGLE_QUERY, AUTO_CALIBRATION, AUTO_PIXEL_THRESHOLD,
     AUTO_AI_THRESHOLD_FLOOR, AUTO_AI_THRESHOLD_CEILING,
     AUTO_AI_THRESHOLD_TOLERANCE,
@@ -354,13 +355,17 @@ class TemplateMatcher:
             else:
                 log("CALIBRATE", f"{query_name}: AI threshold={threshold:.3f} (need 2+ refs)")
 
-    def _classify_candidate(self, candidate_bgr):
+    def _classify_candidate(self, candidate_bgr, allow_time_rescue=False):
         """Classify a crop against every identity using open-set rejection."""
         candidate_features = self.ai_extractor.extract_feature(candidate_bgr)
         if not candidate_features:
             return None
 
-        return self._classify_features(candidate_features)
+        classification = self._classify_features(
+            candidate_features,
+            allow_time_rescue=allow_time_rescue,
+        )
+        return self._confirm_time_rescue(classification, candidate_bgr)
 
     def _classify_face_features(self, candidate_features):
         """Use a confident face match to rescue clothing-change cases."""
@@ -398,7 +403,7 @@ class TemplateMatcher:
         best["threshold"] = float(FACE_MATCH_THRESHOLD)
         return best
 
-    def _classify_features(self, candidate_features):
+    def _classify_features(self, candidate_features, allow_time_rescue=False):
         """Apply the normal ensemble/open-set policy to existing embeddings."""
 
         face_result = self._classify_face_features(candidate_features)
@@ -465,13 +470,23 @@ class TemplateMatcher:
             f"thresh={identity_threshold:.3f}",
         )
 
-        if best['score'] < identity_threshold or margin < AI_MATCH_MARGIN:
-            if margin < AI_MATCH_MARGIN and best['score'] >= identity_threshold:
+        below_identity_threshold = best['score'] < identity_threshold
+        if margin < AI_MATCH_MARGIN:
+            if best['score'] >= identity_threshold:
                 log(
                     "REJECT",
                     f"Margin quá nhỏ ({margin:.3f}<{AI_MATCH_MARGIN:.3f}): "
                     f"{best['query']} vs {second_query} — bỏ qua để tránh nhầm",
                 )
+            return face_result
+
+        pending_time_rescue = (
+            below_identity_threshold
+            and allow_time_rescue
+            and best['score'] >= AI_TIME_RESCUE_SCORE_FLOOR
+            and margin >= AI_TIME_RESCUE_MARGIN
+        )
+        if below_identity_threshold and not pending_time_rescue:
             return face_result
 
         if best['best_reference_score'] < AI_BEST_REFERENCE_THRESHOLD:
@@ -490,11 +505,59 @@ class TemplateMatcher:
             if winners and any(winner != best['query'] for winner in winners):
                 return face_result
 
+        if pending_time_rescue and face_result is not None:
+            return face_result
+
         best['margin'] = float(margin)
         best['threshold'] = float(identity_threshold)
         best['reference_threshold'] = float(AI_BEST_REFERENCE_THRESHOLD)
         best['source'] = "body"
+        if pending_time_rescue:
+            best['_needs_time_confirmation'] = True
         return best
+
+    def _confirm_time_rescue(self, classification, candidate_bgr):
+        """Confirm a near-threshold body match with an exact card timestamp."""
+        if not classification or not classification.pop(
+            '_needs_time_confirmation', False
+        ):
+            return classification
+
+        query_name = classification.get('query')
+        reference_times = self.reference_timestamps.get(query_name, [])
+        card_timestamp = extract_reference_timestamp(candidate_bgr)
+        if not card_timestamp or not reference_times:
+            log(
+                "REJECT",
+                f"Near-threshold {query_name} lacks a readable matching time",
+            )
+            return None
+
+        exact_match = any(
+            timestamps_match(
+                card_timestamp,
+                reference_time,
+                tolerance_minutes=OCR_TIMESTAMP_TOLERANCE,
+            )
+            for reference_time in reference_times
+        )
+        if not exact_match:
+            log(
+                "REJECT",
+                f"Near-threshold {query_name} time {card_timestamp} "
+                f"not in references {sorted(set(reference_times))}",
+            )
+            return None
+
+        classification['card_timestamp'] = card_timestamp
+        classification['time_rescue'] = True
+        log(
+            "RESCUE",
+            f"Accepted near-threshold {query_name}: "
+            f"score={classification['score']:.3f}, "
+            f"margin={classification['margin']:.3f}, time={card_timestamp}",
+        )
+        return classification
 
     def _rank_features(self, candidate_features, model_names=None):
         """Rank identities for a precomputed feature set without rejection."""
@@ -643,7 +706,11 @@ class TemplateMatcher:
             )
             # Reuse the normal conservative open-set classifier policy, but
             # avoid recomputing the already extracted primary embedding.
-            classification = self._classify_features(features)
+            classification = self._classify_features(
+                features,
+                allow_time_rescue=True,
+            )
+            classification = self._confirm_time_rescue(classification, crop)
             if classification:
                 classification.update({
                     "bbox": bbox,
@@ -653,8 +720,9 @@ class TemplateMatcher:
                 matches.append(classification)
 
         matches = self._filter_matches_by_card_timestamp(matches, screenshot_bgr)
-        # Keep the same single-identity policy as the full scan so that cards
-        # of a secondary identity cannot exceed the per-folder N-1 cap.
+        # The domain guarantees one target identity per screenshot. Fast-grid
+        # classifies cards independently, so enforce the same dominant-Query
+        # policy used by the full scan before applying each folder's N-1 cap.
         if ENFORCE_SINGLE_QUERY:
             matches = dominant_query_only(matches)
         matches = self._limit_and_align_matches(matches)
@@ -753,7 +821,7 @@ class TemplateMatcher:
             if crop.shape[0] < 10 or crop.shape[1] < 10:
                 return match, True
 
-            card_ts = extract_reference_timestamp(crop)
+            card_ts = match.get("card_timestamp") or extract_reference_timestamp(crop)
             if not card_ts:
                 # Unreadable time — do not reject, trust the AI score.
                 return match, True
@@ -1160,7 +1228,10 @@ class TemplateMatcher:
                 candidate_bgr = screenshot_bgr[y:y2, x:x2]
                 if candidate_bgr.shape[0] < 10 or candidate_bgr.shape[1] < 10:
                     return None
-                classification = self._classify_candidate(candidate_bgr)
+                classification = self._classify_candidate(
+                    candidate_bgr,
+                    allow_time_rescue=True,
+                )
                 if classification:
                     m_copy = dict(m)
                     m_copy.update(classification)
@@ -1536,6 +1607,11 @@ def _get_clipboard_sequence_number() -> int | None:
         return int(user32.GetClipboardSequenceNumber())
     except (AttributeError, OSError):
         return None
+
+
+def get_clipboard_sequence_number() -> int | None:
+    """Return the cheap Windows clipboard generation used by the GUI poller."""
+    return _get_clipboard_sequence_number()
 
 
 def _clipboard_token(payload: bytes) -> str:

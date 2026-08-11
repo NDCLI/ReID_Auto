@@ -91,6 +91,13 @@ AI_BEST_REFERENCE_THRESHOLD = 0.62
 AI_TOP_K_REFERENCES = 2
 AI_REQUIRE_MODEL_AGREEMENT = True
 
+# A body match that narrowly misses the normal identity threshold may be
+# recovered only when OCR independently confirms an exact Query timestamp and
+# every body model agrees on the same identity. This handles frame-to-frame
+# score jitter without lowering the global open-set threshold for strangers.
+AI_TIME_RESCUE_SCORE_FLOOR = 0.62
+AI_TIME_RESCUE_MARGIN = 0.15
+
 # Automatic mode: pixel matching is deliberately permissive, then the local
 # AI ensemble and a per-query calibrated threshold reject uncertain crops.
 AUTO_CALIBRATION = True
@@ -147,8 +154,10 @@ CLICK_BOX_MIN_SIZE = 20
 # ============================================================
 # CLIPBOARD MONITORING
 # ============================================================
-# How often to check clipboard for new images (seconds)
-POLL_INTERVAL = 0.5
+# How often to check the lightweight Windows clipboard sequence (seconds).
+# The image itself is read only after the sequence changes, so 10 Hz stays
+# inexpensive while reducing average capture-detection latency to about 50 ms.
+POLL_INTERVAL = 0.1
 
 # ============================================================
 # QUERY IMAGE NAMING CONVENTION

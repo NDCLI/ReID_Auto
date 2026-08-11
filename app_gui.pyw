@@ -3,6 +3,7 @@ import re
 import shutil
 import sys
 import datetime
+import time
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -15,9 +16,19 @@ from auto_marker import (
     TemplateMatcher,
     get_clipboard_image,
     get_clipboard_image_hash,
+    get_clipboard_sequence_number,
     read_image_file,
 )
-from config import APP_MUTEX_NAME, APP_NAME, QUERIES_DIR, OUTPUT_DIR, MATCH_THRESHOLD
+from config import (
+    APP_MUTEX_NAME,
+    APP_NAME,
+    QUERIES_DIR,
+    OUTPUT_DIR,
+    MATCH_THRESHOLD,
+    POLL_INTERVAL,
+    ENABLE_OCR_TIMESTAMP_FILTER,
+)
+from ocr_utils import warm_up_card_ocr
 from library_win import LibraryWindow
 from preview_win import PreviewWindow
 from query_organizer import QueryAutoCollector, MAX_QUERY_COUNT
@@ -285,6 +296,8 @@ class AutoMarkerApp:
         self.is_monitoring = False
         self.log_queue = queue.Queue()
         self.last_clipboard_hash = None
+        self.last_clipboard_sequence = None
+        self.clipboard_poll_ms = max(50, int(round(POLL_INTERVAL * 1000)))
         self.is_processing = False
         self.active_preview_window = None
         self.left_click_timer = None
@@ -536,9 +549,6 @@ class AutoMarkerApp:
 
         self.root.bind("<Configure>", _on_root_configure, add="+")
         
-        # Auto-start marker after GUI initialization
-        self.root.after(500, self.start_marker)
-
     def update_queries_dropdown(self):
         """Update the dropdown with subfolders in queries directory."""
         if not os.path.exists(QUERIES_DIR):
@@ -819,6 +829,11 @@ class AutoMarkerApp:
         )
 
     def start_marker(self):
+        # A second call while the first background initialization is running
+        # would compile every OpenVINO model and create another poll loop.
+        if self.is_monitoring:
+            return
+
         # Check if queries dir exists and has files (either subfolders or direct images)
         valid_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp')
         has_data = False
@@ -856,6 +871,14 @@ class AutoMarkerApp:
                     matcher.reference_timestamps.clear()
                     matcher.query_thresholds.clear()
                     matcher._load_references(QUERIES_DIR)
+
+                if ENABLE_OCR_TIMESTAMP_FILTER:
+                    ocr_started = time.perf_counter()
+                    if warm_up_card_ocr():
+                        print(
+                            "  [PERF] Card OCR ready in "
+                            f"{time.perf_counter() - ocr_started:.2f}s"
+                        )
                 
                 def _on_init_complete():
                     if not getattr(self, 'is_monitoring', False):
@@ -870,6 +893,9 @@ class AutoMarkerApp:
                         self.query_collector = QueryAutoCollector(
                             QUERIES_DIR, self.matcher.ai_extractor
                         )
+                    self.last_clipboard_sequence = get_clipboard_sequence_number()
+                    # Retain the image hash only as a fallback for platforms
+                    # where a clipboard sequence number is unavailable.
                     self.last_clipboard_hash = get_clipboard_image_hash()
                     
                     self.lbl_status.configure(text="● ĐANG CHẠY", text_color="#2ECC71")
@@ -898,45 +924,61 @@ class AutoMarkerApp:
             
         # Skip clipboard checking if we are already processing or if a review window is currently open
         if getattr(self, 'is_processing', False):
-            self.root.after(500, self.poll_clipboard)
+            self.root.after(self.clipboard_poll_ms, self.poll_clipboard)
             return
             
         if getattr(self, 'active_preview_window', None) is not None:
             try:
                 if self.active_preview_window.winfo_exists():
-                    self.root.after(500, self.poll_clipboard)
+                    self.root.after(self.clipboard_poll_ms, self.poll_clipboard)
                     return
             except (tk.TclError, AttributeError):
                 self.active_preview_window = None
                 
         try:
-            current_hash = get_clipboard_image_hash()
-            if current_hash is not None and current_hash != self.last_clipboard_hash:
-                self.last_clipboard_hash = current_hash
-                
+            sequence = get_clipboard_sequence_number()
+            clipboard_changed = False
+            if sequence is not None:
+                if sequence != self.last_clipboard_sequence:
+                    self.last_clipboard_sequence = sequence
+                    clipboard_changed = True
+            else:
+                # Compatibility fallback: hashing is more expensive, but is
+                # only needed when Windows cannot provide a sequence number.
+                current_hash = get_clipboard_image_hash()
+                if current_hash is not None and current_hash != self.last_clipboard_hash:
+                    self.last_clipboard_hash = current_hash
+                    clipboard_changed = True
+
+            if clipboard_changed:
                 # Check if we should ignore this change (triggered by our own Save & Copy)
                 if getattr(self.matcher, 'ignore_next_clipboard', False):
                     self.matcher.ignore_next_clipboard = False
                     print("  [INFO] Ignoring clipboard change triggered by Preview Save.")
-                elif get_foreground_process_name() in CLIPBOARD_IGNORE_PROCESSES:
-                    # An Excel copy macro (or similar) is pushing images onto the
-                    # clipboard. The hash is already recorded above, so this image
-                    # won't retrigger later even after Excel loses focus.
-                    print("  [INFO] Ignoring clipboard change from Excel (copy macro).")
                 else:
-                    print("  [DETECT] New image found in clipboard.")
                     pil_img = get_clipboard_image()
                     if pil_img is not None:
-                        self.is_processing = True
-                        # Process image in a background thread so GUI doesn't freeze during matching
-                        threading.Thread(target=self.process_clipboard_image, args=(pil_img,), daemon=True).start()
+                        if get_foreground_process_name() in CLIPBOARD_IGNORE_PROCESSES:
+                            # An Excel copy macro (or similar) is pushing an
+                            # image. The sequence is recorded above, so it will
+                            # not retrigger after Excel loses focus.
+                            print("  [INFO] Ignoring clipboard change from Excel (copy macro).")
+                        else:
+                            detected_at = time.perf_counter()
+                            print("  [DETECT] New image found in clipboard.")
+                            self.is_processing = True
+                            # Process image in a background thread so GUI doesn't freeze during matching
+                            threading.Thread(
+                                target=self.process_clipboard_image,
+                                args=(pil_img, detected_at),
+                                daemon=True,
+                            ).start()
         except (OSError, ValueError, TypeError) as e:
             print(f"  [CLIPBOARD POLL ERROR] {e}")
             
-        # Schedule next check in 500ms
-        self.root.after(500, self.poll_clipboard)
+        self.root.after(self.clipboard_poll_ms, self.poll_clipboard)
 
-    def process_clipboard_image(self, pil_img):
+    def process_clipboard_image(self, pil_img, detected_at=None):
         try:
             import cv2
             import numpy as np
@@ -988,7 +1030,12 @@ class AutoMarkerApp:
                     ctypes.windll.user32.MessageBeep(0x00000010)  # Hand / Error sound
                 except (OSError, AttributeError):
                     pass
-                self.root.after(0, lambda: self.open_preview_window(current_bgr, []))
+                self.root.after(
+                    0,
+                    lambda: self.open_preview_window(
+                        current_bgr, [], detected_at, elapsed
+                    ),
+                )
             else:
                 print(f"  [RESULT] Found {len(matches)} match(es) in {elapsed:.1f}s.")
                 try:
@@ -996,7 +1043,12 @@ class AutoMarkerApp:
                     ctypes.windll.user32.MessageBeep(0x00000040)  # Asterisk / Info sound
                 except (OSError, AttributeError):
                     pass
-                self.root.after(0, lambda: self.open_preview_window(current_bgr, matches))
+                self.root.after(
+                    0,
+                    lambda: self.open_preview_window(
+                        current_bgr, matches, detected_at, elapsed
+                    ),
+                )
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -1083,10 +1135,24 @@ class AutoMarkerApp:
             print(f"  [WARN] Error in check_is_reid_interface: {e}")
             return True
 
-    def open_preview_window(self, current_bgr, matches):
+    def open_preview_window(
+        self, current_bgr, matches, detected_at=None, matching_elapsed=None
+    ):
         # Open preview window on Main Thread
+        ui_started = time.perf_counter()
         self.active_preview_window = PreviewWindow(self.root, current_bgr, matches, self.matcher, OUTPUT_DIR)
         self.is_processing = False
+        if detected_at is not None:
+            total = time.perf_counter() - detected_at
+            ui_elapsed = time.perf_counter() - ui_started
+            match_info = (
+                f", matching={matching_elapsed:.3f}s"
+                if matching_elapsed is not None else ""
+            )
+            print(
+                f"  [PERF] Clipboard detect -> Review ready: {total:.3f}s"
+                f"{match_info}, review_ui={ui_elapsed:.3f}s"
+            )
 
     def process_logs(self):
         """Consume logs from the queue and write to the text widget (thread-safe)."""

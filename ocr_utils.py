@@ -131,6 +131,27 @@ def _get_rapidocr_engine():
     return _RAPIDOCR_ENGINE
 
 
+def warm_up_card_ocr() -> bool:
+    """Load RapidOCR and warm its recognition-only path.
+
+    Card crops already isolate a single timestamp line, so the detector and
+    orientation classifier are unnecessary. Warming this path while the app is
+    initializing prevents the first Review from paying the OpenVINO startup
+    cost.
+    """
+    engine = _get_rapidocr_engine()
+    if engine is None:
+        return False
+
+    sample = np.zeros((48, 256, 3), dtype=np.uint8)
+    with _RAPIDOCR_LOCK:
+        try:
+            engine(sample, use_det=False, use_cls=False, use_rec=True)
+        except (OSError, RuntimeError, ValueError, TypeError):
+            return False
+    return True
+
+
 def _rapidocr_result_items(result):
     """Return ``(text, confidence)`` pairs from RapidOCR result variants."""
     if isinstance(result, tuple):
@@ -173,7 +194,11 @@ def _rapidocr_result_items(result):
 def _rapidocr_variants(image_bgr: np.ndarray):
     """Yield enlarged bottom-card crops for RapidOCR."""
     h, w = image_bgr.shape[:2]
-    for bottom_pct in (0.25, 0.30, 0.20):
+    # Start with tight bands around the timestamp baseline. Wider 25-30%
+    # crops include too much of the person/background and can collapse
+    # repeated digits (for example ``1:55 PM`` -> ``1:5PM``). The 18% and 28%
+    # views independently retain that timestamp on the real Re-ID cards.
+    for bottom_pct in (0.18, 0.28, 0.20, 0.22, 0.25, 0.30):
         bottom = image_bgr[int(h * (1 - bottom_pct)):, :]
         if bottom.shape[0] < 2 or bottom.shape[1] < 2:
             continue
@@ -191,10 +216,10 @@ def _rapidocr_variants(image_bgr: np.ndarray):
 
 def _rapidocr_timestamp(image_bgr: np.ndarray) -> Optional[str]:
     """Extract a timestamp with RapidOCR using consensus across crop variants.
-    
-    Uses a lock for thread safety and exits early when the first crop
-    variant returns a high-confidence result, skipping remaining variants
-    to save ~200-300 ms per card.
+
+    Uses a lock for thread safety and stops as soon as two crop variants agree.
+    Recognition-only inference is cheap enough to preserve this consensus gate
+    instead of trusting one high-confidence but potentially truncated reading.
     """
     engine = _get_rapidocr_engine()
     if engine is None:
@@ -204,21 +229,56 @@ def _rapidocr_timestamp(image_bgr: np.ndarray) -> Optional[str]:
     for variant in _rapidocr_variants(image_bgr):
         with _RAPIDOCR_LOCK:
             try:
-                result = engine(variant)
+                # The crop contains one centered timestamp line already.
+                # Recognition-only avoids running text detection and
+                # orientation classification for every accepted card.
+                result = engine(
+                    variant,
+                    use_det=False,
+                    use_cls=False,
+                    use_rec=True,
+                )
             except (OSError, RuntimeError, ValueError, TypeError):
                 continue
         for text, confidence in _rapidocr_result_items(result):
             timestamp = _parse_time_ampm(text)
             if timestamp:
                 votes.setdefault(timestamp, []).append(confidence)
-        # Early exit: high-confidence timestamp found — skip remaining
-        # variants to save ~200-300 ms per card.
-        if votes:
-            best_conf = max(c for confs in votes.values() for c in confs)
-            if best_conf >= 0.7:
-                break
+        # Two independent crops agreeing is enough; a single reading still
+        # needs another variant because the leading "1" is easily truncated.
+        if any(len(confidences) >= 2 for confidences in votes.values()):
+            break
 
     if not votes:
+        # Rare fallback: let RapidOCR detect the text line when direct
+        # recognition could not parse any tight crop. This costs more, but it
+        # runs only for an otherwise-unreadable card and prevents the filter
+        # from silently keeping a different-time candidate.
+        h, w = image_bgr.shape[:2]
+        bottom = image_bgr[int(h * 0.75):, :]
+        if bottom.shape[0] >= 2 and bottom.shape[1] >= 2:
+            enlarged = cv2.resize(
+                bottom,
+                (bottom.shape[1] * 8, bottom.shape[0] * 8),
+                interpolation=cv2.INTER_CUBIC,
+            )
+            with _RAPIDOCR_LOCK:
+                try:
+                    result = engine(
+                        enlarged,
+                        use_det=True,
+                        use_cls=True,
+                        use_rec=True,
+                    )
+                except (OSError, RuntimeError, ValueError, TypeError):
+                    result = None
+            parsed = [
+                (timestamp, confidence)
+                for text, confidence in _rapidocr_result_items(result)
+                if (timestamp := _parse_time_ampm(text))
+            ]
+            if parsed:
+                return max(parsed, key=lambda item: item[1])[0]
         return None
     return max(
         votes,
@@ -393,7 +453,14 @@ def _rapidocr_screenshot(image_bgr: np.ndarray) -> str:
     inverted = cv2.bitwise_not(scaled)
     with _RAPIDOCR_LOCK:
         try:
-            result = engine(inverted)
+            # Full-screen regions can contain multiple text lines, so restore
+            # the full OCR pipeline explicitly (RapidOCR options are stateful).
+            result = engine(
+                inverted,
+                use_det=True,
+                use_cls=True,
+                use_rec=True,
+            )
         except (OSError, RuntimeError, ValueError, TypeError):
             result = None
     if result is not None:
@@ -409,7 +476,12 @@ def _rapidocr_screenshot(image_bgr: np.ndarray) -> str:
     inv2 = cv2.bitwise_not(scaled2)
     with _RAPIDOCR_LOCK:
         try:
-            result2 = engine(inv2)
+            result2 = engine(
+                inv2,
+                use_det=True,
+                use_cls=True,
+                use_rec=True,
+            )
         except (OSError, RuntimeError, ValueError, TypeError):
             result2 = None
     if result2 is not None:
