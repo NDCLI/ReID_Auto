@@ -389,6 +389,43 @@ class TestAcceptedMatchRetention(unittest.TestCase):
         self.assertEqual(len(result), 5)
 
 
+class TestFastRootSourceScoping(unittest.TestCase):
+    """Fast Root must scope result classification to the source Query."""
+
+    def setUp(self):
+        self.matcher = auto_marker.TemplateMatcher.__new__(
+            auto_marker.TemplateMatcher
+        )
+        self.matcher.target_query = None
+        self.matcher.reference_images = {
+            "Query_1": [("ref_1.png", None, {})],
+            "Query_2": [("ref_2.png", None, {})],
+        }
+
+    def test_source_query_is_scoped_only_during_fast_pass(self):
+        boxes = [(0, 0, 80, 180), (100, 0, 180, 180)]
+        seen = {}
+
+        self.matcher._identify_query_by_source_ai = lambda _image: "Query_1"
+
+        def fake_fast_pass(_image):
+            seen["queries"] = set(self.matcher.reference_images)
+            return [{"query": "Query_1", "bbox": boxes[1], "score": 0.75}]
+
+        self.matcher._find_matches_fast_root = fake_fast_pass
+
+        from unittest.mock import patch
+
+        with patch.object(auto_marker, "FAST_ROOT_MODE", True):
+            result = self.matcher._find_matches_inner(
+                np.zeros((200, 200, 3), dtype=np.uint8), None
+            )
+
+        self.assertEqual(seen["queries"], {"Query_1"})
+        self.assertEqual(set(self.matcher.reference_images), {"Query_1", "Query_2"})
+        self.assertEqual(result[0]["query"], "Query_1")
+
+
 # ---------------------------------------------------------------------------
 # Per-card OCR timestamp gate
 # ---------------------------------------------------------------------------

@@ -815,7 +815,7 @@ class AutoMarkerApp:
 
         self.root.withdraw()
         self.active_preview_window = LibraryWindow(
-            self.root, OUTPUT_DIR, on_close=on_close
+            self.root, OUTPUT_DIR, on_close=on_close, matcher=self.matcher
         )
 
     def start_marker(self):

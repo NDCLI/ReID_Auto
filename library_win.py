@@ -89,13 +89,14 @@ def collect_saved_images(output_dir):
 
 
 class LibraryWindow(ctk.CTkToplevel):
-    def __init__(self, master, output_dir, on_close=None):
+    def __init__(self, master, output_dir, on_close=None, matcher=None):
         super().__init__(master)
         self.title("Thư viện ảnh đã lưu")
         self.geometry("1280x820")
         self.minsize(1000, 680)
         self.output_dir = output_dir
         self.on_close_callback = on_close
+        self.matcher = matcher
         self.items = collect_saved_images(output_dir)
         self.current_index = 0
         self.photo = None
@@ -346,7 +347,7 @@ class LibraryWindow(ctk.CTkToplevel):
             messagebox.showerror("Lỗi", f"Không đọc được ảnh: {item['rel']}")
             return "break"
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        if self.matcher:
+        if self.matcher is not None:
             self.matcher.ignore_next_clipboard = True
         copy_image_to_clipboard(Image.fromarray(rgb))
         self.current_label.configure(

@@ -960,13 +960,54 @@ class TemplateMatcher:
                 f"(best={best_folder}, score={best_score:.3f})")
             return None
 
+    def _identify_query_by_source_ai(self, screenshot_bgr):
+        """Identify the active Query from the first result card with Re-ID.
+
+        In Root/Fast mode every result card used to be classified against all
+        Query folders independently.  A genuine card could then lose on the
+        cross-Query margin even when the source card clearly identified the
+        correct person.  The first grid card is the source person shown by
+        the VMS, so use it to scope the fast pass before classifying results.
+        """
+        if (
+            not ENFORCE_SINGLE_QUERY
+            or self.target_query is not None
+            or len(self.reference_images) <= 1
+        ):
+            return None
+
+        grid_boxes = self._detect_result_grid(screenshot_bgr)
+        if not grid_boxes:
+            return None
+
+        x1, y1, x2, y2 = grid_boxes[0]
+        source_crop = screenshot_bgr[y1:y2, x1:x2]
+        if source_crop.shape[0] < 10 or source_crop.shape[1] < 10:
+            return None
+
+        try:
+            classification = self._classify_candidate(source_crop)
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            log("IDENTIFY", f"Source-card AI identification failed: {exc}")
+            return None
+
+        query_name = classification.get("query") if classification else None
+        if query_name not in self.reference_images:
+            return None
+
+        log(
+            "IDENTIFY",
+            f"Source card belongs to {query_name} by AI "
+            f"(score={classification.get('score', 0.0):.3f})",
+        )
+        return query_name
+
     def _find_matches_inner(self, screenshot_bgr, screenshot_timestamp):
         """Core matching logic, called after early timestamp filtering.
 
-        In all-folders mode with ENFORCE_SINGLE_QUERY, identifies the correct
-        query folder by template-matching the first result card (the source
-        query image shown by the VMS UI) against all reference folders. Only
-        the identified folder is scanned for result matches.
+        In all-folders mode with ENFORCE_SINGLE_QUERY, Fast Root first uses AI
+        on the source card to scope the active Query. If that cannot be done,
+        the existing template-based source identification remains the fallback.
         """
         import time as _time
         _t0 = _time.time()
@@ -983,7 +1024,20 @@ class TemplateMatcher:
             f"{active_count} ref(s), template probes={probe_count}")
 
         if FAST_ROOT_MODE:
-            fast_matches = self._find_matches_fast_root(screenshot_bgr)
+            original_fast_refs = self.reference_images
+            identified_fast_query = self._identify_query_by_source_ai(screenshot_bgr)
+            if identified_fast_query:
+                self.reference_images = {
+                    identified_fast_query: original_fast_refs[identified_fast_query]
+                }
+                log(
+                    "PERF",
+                    f"Fast Root scoped to {identified_fast_query} using source card",
+                )
+            try:
+                fast_matches = self._find_matches_fast_root(screenshot_bgr)
+            finally:
+                self.reference_images = original_fast_refs
             if fast_matches is not None:
                 log("PERF", f"Fast grid done in {_time.time()-_t0:.1f}s")
                 return fast_matches

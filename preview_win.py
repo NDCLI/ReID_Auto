@@ -55,42 +55,6 @@ class PreviewWindow(ctk.CTkToplevel):
         self.matches = matches.copy()
         self.matcher = matcher
         self.output_dir = output_dir
-        self.original_threshold = matcher.threshold
-        
-        # Top Frame for controls
-        top_frame = ctk.CTkFrame(self, fg_color="transparent")
-        top_frame.pack(fill=tk.X, padx=15, pady=8)
-        
-        lbl_sens = ctk.CTkLabel(top_frame, text="Độ nhạy Pixel:", font=("Segoe UI", 11, "bold"))
-        lbl_sens.pack(side=tk.LEFT, padx=(0, 5))
-        
-        self.scale = ctk.CTkSlider(top_frame, from_=0.60, to=0.95, number_of_steps=35, width=150)
-        self.scale.set(self.original_threshold)
-        self.scale.pack(side=tk.LEFT, padx=5)
-        
-        self.lbl_thresh = ctk.CTkLabel(top_frame, text=f"{self.original_threshold:.2f}", font=("Segoe UI", 11, "bold"))
-        self.lbl_thresh.pack(side=tk.LEFT, padx=5)
-        
-        self.scale.configure(command=self.on_scale_change)
-        
-        btn_apply = ctk.CTkButton(
-            top_frame, 
-            text="Áp dụng lại", 
-            width=100, 
-            height=28,
-            command=self.re_scan,
-            fg_color="#34495E",
-            hover_color="#2C3E50"
-        )
-        btn_apply.pack(side=tk.LEFT, padx=10)
-        
-        lbl_tip = ctk.CTkLabel(
-            top_frame,
-            text="(MẸO: Click vào ảnh để THÊM/XÓA khung | Chuột phải để LƯU NHANH)",
-            text_color="#3498DB",
-            font=("Segoe UI", 11, "bold")
-        )
-        lbl_tip.pack(side=tk.LEFT, padx=20)
         
         # Bottom Frame for Save/Cancel
         bot_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -135,15 +99,6 @@ class PreviewWindow(ctk.CTkToplevel):
         self.photo = None
         self.scale_factor = 1.0
 
-        self.draw_image()
-
-    def on_scale_change(self, val):
-        self.lbl_thresh.configure(text=f"{float(val):.2f}")
-
-    def re_scan(self):
-        new_thresh = float(self.scale.get())
-        self.matcher.threshold = new_thresh
-        self.matches = self.matcher.find_matches(self.current_bgr, debug=False)
         self.draw_image()
 
     def on_resize(self, event):
@@ -205,9 +160,6 @@ class PreviewWindow(ctk.CTkToplevel):
             self.draw_image()
 
     def save_and_copy(self):
-        # Restore matcher threshold
-        self.matcher.threshold = self.original_threshold
-
         marked_bgr = draw_match_boxes(self.current_bgr.copy(), self.matches)
 
         # Determine query subfolder from dominant query in matches
