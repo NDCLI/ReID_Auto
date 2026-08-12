@@ -14,7 +14,15 @@ from auto_marker import (
 )
 
 class PreviewWindow(ctk.CTkToplevel):
-    def __init__(self, master, current_bgr, matches, matcher, output_dir):
+    def __init__(
+        self,
+        master,
+        current_bgr,
+        matches,
+        matcher,
+        output_dir,
+        on_close_callback=None,
+    ):
         super().__init__(master)
         self.title("Duyệt Ảnh - Chỉnh sửa kết quả")
 
@@ -55,8 +63,11 @@ class PreviewWindow(ctk.CTkToplevel):
         self.matches = matches.copy()
         self.matcher = matcher
         self.output_dir = output_dir
+        self.on_close_callback = on_close_callback
+        self._closed = False
         
         self.configure(fg_color="#15181C")
+        self.protocol("WM_DELETE_WINDOW", self.close)
 
         # Bottom Frame for Save/Cancel
         bot_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -69,7 +80,7 @@ class PreviewWindow(ctk.CTkToplevel):
             height=30,
             corner_radius=8,
             font=("Segoe UI", 11, "bold"),
-            command=self.destroy,
+            command=self.close,
             fg_color="#2A2F37",
             hover_color="#353B45"
         )
@@ -101,7 +112,7 @@ class PreviewWindow(ctk.CTkToplevel):
         self.bind("<Button-3>", lambda e: self.save_and_copy())
         
         self.bind("<Configure>", self.on_resize)
-        self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<Escape>", lambda e: self.close())
         
         self.photo = None
         self.scale_factor = 1.0
@@ -189,4 +200,14 @@ class PreviewWindow(ctk.CTkToplevel):
         self.matcher.ignore_next_clipboard = True
 
         notify_sound(success=True)
-        self.destroy()
+        self.close()
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self.on_close_callback:
+                self.on_close_callback()
+        finally:
+            self.destroy()

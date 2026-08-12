@@ -191,3 +191,12 @@ OCR_TIMESTAMP_TOLERANCE = 0
 # Small reference images always use RapidOCR first, then Windows OCR.
 # When winocr is available it is always tried first regardless of this setting.
 OCR_METHOD = 'winocr'
+
+# ============================================================
+# LOGGING
+# ============================================================
+# Khi False (mặc định): chỉ hiển thị log cần thiết trên giao diện
+# (kết quả quét, số khung vẽ được/lý do thiếu, trạng thái OCR, cảnh báo/lỗi).
+# Khi True: hiện thêm log chẩn đoán chi tiết (PERF, CALIBRATE, từng ảnh mẫu,
+# từng match, nhận diện thẻ nguồn...) để gỡ lỗi.
+VERBOSE_LOGGING = False

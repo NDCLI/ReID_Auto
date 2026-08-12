@@ -27,6 +27,7 @@ from config import (
     MATCH_THRESHOLD,
     POLL_INTERVAL,
     ENABLE_OCR_TIMESTAMP_FILTER,
+    VERBOSE_LOGGING,
 )
 from ocr_utils import warm_up_card_ocr
 from library_win import LibraryWindow
@@ -464,6 +465,18 @@ class AutoMarkerApp:
             font=("Segoe UI", 10, "bold"),
         ).pack(side=tk.LEFT)
 
+        ctk.CTkButton(
+            toolbar,
+            text="🧹 Xóa cache & OCR lại",
+            width=150,
+            height=30,
+            corner_radius=8,
+            font=("Segoe UI", 10, "bold"),
+            command=self.rebuild_cache_and_reocr,
+            fg_color="#0EA5A3",
+            hover_color="#0C8886",
+        ).pack(side=tk.LEFT, padx=(6, 0))
+
         log_frame = tk.Frame(content, bg="#12151A")
         log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
         
@@ -562,6 +575,13 @@ class AutoMarkerApp:
         
     def update_queries_dropdown(self):
         """Update the dropdown with subfolders in queries directory."""
+        # Drop cache left behind by images that were deleted or moved out of a
+        # Query (e.g. a screenshot saved into the wrong folder). This keeps the
+        # OCR/feature cache aligned with the images actually present.
+        pruned = self._prune_orphaned_cache(QUERIES_DIR)
+        if pruned:
+            print(f"[CACHE] Đã dọn {pruned} tệp cache mồ côi (ảnh nguồn đã bị xóa).")
+
         if not os.path.exists(QUERIES_DIR):
             os.makedirs(QUERIES_DIR, exist_ok=True)
 
@@ -761,6 +781,141 @@ class AutoMarkerApp:
 
         print(f"Đã cập nhật AI tức thì: {active_name}.")
 
+    def _prune_orphaned_cache(self, base_dir=None):
+        """Remove .cache entries whose source image no longer exists.
+
+        Each Query folder keeps a .cache subfolder with '<image>.npz'
+        (ReID feature) and '<image>.ocr.txt' (OCR timestamp) files, keyed by
+        the exact image filename. When an image is captured into the wrong
+        Query and later deleted, its cache is orphaned and could still be read
+        back. Deleting orphaned cache files keeps the cache in sync with the
+        images actually present. Returns the number of files removed.
+        """
+        base_dir = base_dir or QUERIES_DIR
+        valid_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp')
+        removed = 0
+        if not os.path.isdir(base_dir):
+            return 0
+        for root_dir, _dirs, files in os.walk(base_dir):
+            if os.path.basename(root_dir) != ".cache":
+                continue
+            parent = os.path.dirname(root_dir)
+            try:
+                existing_images = {
+                    name for name in os.listdir(parent)
+                    if name.lower().endswith(valid_exts)
+                    and os.path.isfile(os.path.join(parent, name))
+                }
+            except OSError:
+                continue
+            for cache_file in files:
+                if cache_file.endswith(".ocr.txt"):
+                    source_name = cache_file[:-len(".ocr.txt")]
+                elif cache_file.endswith(".npz"):
+                    source_name = cache_file[:-len(".npz")]
+                else:
+                    continue
+                if source_name not in existing_images:
+                    try:
+                        os.remove(os.path.join(root_dir, cache_file))
+                        removed += 1
+                    except OSError:
+                        pass
+        return removed
+
+    def rebuild_cache_and_reocr(self):
+        """Wipe every .cache subtree, then re-extract features and re-run OCR.
+
+        Use this when caches might be stale or mismatched — e.g. an image was
+        saved into the wrong Query and then moved/deleted. Query images are NOT
+        touched; only the derived cache is rebuilt from scratch. The heavy
+        recompute runs on a background thread so the UI stays responsive.
+        """
+        if not os.path.isdir(QUERIES_DIR):
+            messagebox.showinfo("Thông báo", "Chưa có thư mục queries nào.")
+            return
+
+        if not messagebox.askyesno(
+            "Xóa cache & OCR lại",
+            "Sẽ xóa toàn bộ cache OCR/feature trong thư mục queries và tính "
+            "lại từ đầu cho MỌI ảnh.\n\n"
+            "• Ảnh Query của bạn KHÔNG bị xóa.\n"
+            "• Lần xử lý này có thể chậm hơn bình thường.\n\n"
+            "Tiếp tục?",
+        ):
+            return
+
+        deleted_cache = 0
+        for root_dir, _dirs, files in os.walk(QUERIES_DIR, topdown=False):
+            if os.path.basename(root_dir) == ".cache":
+                deleted_cache += len(files)
+                try:
+                    shutil.rmtree(root_dir)
+                except OSError:
+                    pass
+        print(f"[CACHE] Đã xóa {deleted_cache} tệp cache. Đang OCR lại toàn bộ ảnh...")
+
+        matcher = getattr(self, "matcher", None)
+        if matcher is None:
+            # No AI matcher in memory yet: caches will be rebuilt automatically
+            # the next time monitoring starts.
+            self.update_queries_dropdown()
+            messagebox.showinfo(
+                "Hoàn tất",
+                f"Đã xóa {deleted_cache} tệp cache cũ.\n"
+                "Toàn bộ ảnh sẽ được OCR lại khi bạn bấm ▶ BẬT.",
+            )
+            return
+
+        self.lbl_status.configure(
+            text="● ĐANG OCR LẠI...", text_color="#FFFFFF", fg_color="#F59E0B"
+        )
+
+        def _reocr_thread():
+            try:
+                matcher.reference_images.clear()
+                matcher.query_images.clear()
+                matcher.reference_timestamps.clear()
+                matcher.query_thresholds.clear()
+                if ENABLE_OCR_TIMESTAMP_FILTER:
+                    warm_up_card_ocr()
+                matcher._load_references(QUERIES_DIR)
+
+                def _done():
+                    self._matcher_reference_cache = matcher.reference_images
+                    self._matcher_query_image_cache = matcher.query_images
+                    self._apply_matcher_query_selection()
+                    running = getattr(self, "is_monitoring", False)
+                    self.lbl_status.configure(
+                        text="● ĐANG CHẠY" if running else "● ĐANG DỪNG",
+                        text_color="#FFFFFF",
+                        fg_color="#22C55E" if running else "#EF4444",
+                    )
+                    self.update_queries_dropdown()
+                    messagebox.showinfo(
+                        "Hoàn tất",
+                        f"Đã xóa {deleted_cache} tệp cache cũ và OCR lại "
+                        "toàn bộ ảnh Query.",
+                    )
+
+                self.root.after(0, _done)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.root.after(
+                    0,
+                    lambda: (
+                        self.lbl_status.configure(
+                            text="● ĐANG DỪNG",
+                            text_color="#FFFFFF",
+                            fg_color="#EF4444",
+                        ),
+                        messagebox.showerror("Lỗi", f"Lỗi khi OCR lại: {e}"),
+                    ),
+                )
+
+        threading.Thread(target=_reocr_thread, daemon=True).start()
+
     def clear_data(self):
         query_has_data = os.path.isdir(self.current_queries_dir) and any(
             True for _ in os.scandir(self.current_queries_dir)
@@ -887,7 +1042,7 @@ class AutoMarkerApp:
                     ocr_started = time.perf_counter()
                     if warm_up_card_ocr():
                         print(
-                            "  [PERF] Card OCR ready in "
+                            "  [OCR] Sẵn sàng đọc thời gian trên thẻ sau "
                             f"{time.perf_counter() - ocr_started:.2f}s"
                         )
                 
@@ -929,6 +1084,22 @@ class AutoMarkerApp:
         self.lbl_status.configure(text="● ĐANG DỪNG", text_color="#FFFFFF", fg_color="#EF4444")
         print("\n⏹ Đã dừng tool vẽ khung.")
 
+    def _sync_clipboard_snapshot(self):
+        """Consume the current clipboard state without triggering processing."""
+        sequence = get_clipboard_sequence_number()
+        if sequence is not None:
+            self.last_clipboard_sequence = sequence
+            return
+
+        current_hash = get_clipboard_image_hash()
+        if current_hash is not None:
+            self.last_clipboard_hash = current_hash
+
+    def _on_preview_window_closed(self):
+        """Clear review state and remember the latest clipboard snapshot."""
+        self.active_preview_window = None
+        self._sync_clipboard_snapshot()
+
     def poll_clipboard(self):
         if not getattr(self, 'is_monitoring', False):
             return
@@ -943,6 +1114,7 @@ class AutoMarkerApp:
                 if self.active_preview_window.winfo_exists():
                     self.root.after(self.clipboard_poll_ms, self.poll_clipboard)
                     return
+                self.active_preview_window = None
             except (tk.TclError, AttributeError):
                 self.active_preview_window = None
                 
@@ -1139,7 +1311,8 @@ class AutoMarkerApp:
                 if max_val > best_val:
                     best_val = max_val
                     
-            print(f"  [REID DETECT] Best match confidence for Re-ID UI: {best_val:.4f}")
+            if VERBOSE_LOGGING:
+                print(f"  [REID DETECT] Best match confidence for Re-ID UI: {best_val:.4f}")
             # A threshold of 0.70 is extremely safe and robust
             return best_val >= 0.70
         except (cv2.error, OSError, ValueError) as e:
@@ -1151,8 +1324,16 @@ class AutoMarkerApp:
     ):
         # Open preview window on Main Thread
         ui_started = time.perf_counter()
-        self.active_preview_window = PreviewWindow(self.root, current_bgr, matches, self.matcher, OUTPUT_DIR)
+        self.active_preview_window = PreviewWindow(
+            self.root,
+            current_bgr,
+            matches,
+            self.matcher,
+            OUTPUT_DIR,
+            on_close_callback=self._on_preview_window_closed,
+        )
         self.is_processing = False
+        self._sync_clipboard_snapshot()
         if detected_at is not None:
             total = time.perf_counter() - detected_at
             ui_elapsed = time.perf_counter() - ui_started
