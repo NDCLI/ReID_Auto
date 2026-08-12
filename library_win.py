@@ -136,21 +136,22 @@ class LibraryWindow(ctk.CTkToplevel):
         self.after(150, apply_icon)
 
     def _build_ui(self):
+        self.configure(fg_color="#15181C")
         header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(fill=tk.X, padx=14, pady=(10, 6))
+        header.pack(fill=tk.X, padx=16, pady=(16, 8))
         ctk.CTkLabel(
             header,
             text="THƯ VIỆN ẢNH ĐÃ LƯU",
             font=("Segoe UI", 16, "bold"),
-            text_color="#3498DB",
+            text_color="#3B82F6",
         ).pack(side=tk.LEFT)
         self.summary_label = ctk.CTkLabel(header, text="", font=("Segoe UI", 11))
         self.summary_label.pack(side=tk.RIGHT)
 
-        body = ctk.CTkFrame(self)
-        body.pack(fill=tk.BOTH, expand=True, padx=14, pady=6)
+        body = ctk.CTkFrame(self, fg_color="#1E2228", corner_radius=12, border_width=1, border_color="#2A2F37")
+        body.pack(fill=tk.BOTH, expand=True, padx=16, pady=8)
 
-        sidebar = ctk.CTkFrame(body, width=275)
+        sidebar = ctk.CTkFrame(body, width=275, fg_color="#1E2228", corner_radius=12)
         sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8), pady=8)
         sidebar.pack_propagate(False)
         ctk.CTkLabel(
@@ -158,9 +159,9 @@ class LibraryWindow(ctk.CTkToplevel):
         ).pack(anchor=tk.W, padx=10, pady=(10, 5))
         self.listbox = tk.Listbox(
             sidebar,
-            bg="#182126",
-            fg="#ECF0F1",
-            selectbackground="#2471A3",
+            bg="#12151A",
+            fg="#E6EAF0",
+            selectbackground="#3B82F6",
             selectforeground="white",
             borderwidth=0,
             highlightthickness=0,
@@ -169,18 +170,18 @@ class LibraryWindow(ctk.CTkToplevel):
         self.listbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self.listbox.bind("<<ListboxSelect>>", self._on_select)
 
-        viewer = ctk.CTkFrame(body, fg_color="#1E272C")
+        viewer = ctk.CTkFrame(body, fg_color="#12151A", corner_radius=12, border_width=1, border_color="#2A2F37")
         viewer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8), pady=8)
-        self.canvas = tk.Canvas(viewer, bg="#1E272C", highlightthickness=0)
-        self.canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.canvas = tk.Canvas(viewer, bg="#12151A", highlightthickness=0)
+        self.canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.canvas.bind("<ButtonPress-1>", self._on_canvas_click)
 
         controls = ctk.CTkFrame(self, fg_color="transparent")
-        controls.pack(fill=tk.X, padx=14, pady=(4, 12))
-        ctk.CTkButton(controls, text="← Trước", width=90, command=self.previous).pack(
+        controls.pack(fill=tk.X, padx=16, pady=(6, 16))
+        ctk.CTkButton(controls, text="← Trước", width=90, height=30, corner_radius=8, fg_color="#2A2F37", hover_color="#353B45", font=("Segoe UI", 11, "bold"), command=self.previous).pack(
             side=tk.LEFT, padx=4
         )
-        ctk.CTkButton(controls, text="Tiếp →", width=90, command=self.next).pack(
+        ctk.CTkButton(controls, text="Tiếp →", width=90, height=30, corner_radius=8, fg_color="#2A2F37", hover_color="#353B45", font=("Segoe UI", 11, "bold"), command=self.next).pack(
             side=tk.LEFT, padx=4
         )
         self.current_label = ctk.CTkLabel(controls, text="")
@@ -189,31 +190,31 @@ class LibraryWindow(ctk.CTkToplevel):
             controls,
             text="ĐÓNG",
             width=90,
-            fg_color="#7F8C8D",
+            fg_color="#2A2F37",
             command=self.close,
         ).pack(side=tk.RIGHT, padx=4)
         ctk.CTkButton(
             controls,
             text="🔄 LÀM MỚI",
             width=110,
-            fg_color="#34495E",
-            hover_color="#2C3E50",
+            fg_color="#2A2F37",
+            hover_color="#353B45",
             command=self.refresh,
         ).pack(side=tk.RIGHT, padx=4)
         ctk.CTkButton(
             controls,
             text="XÓA ẢNH (Del)",
             width=130,
-            fg_color="#E74C3C",
-            hover_color="#C0392B",
+            fg_color="#EF4444",
+            hover_color="#DC2626",
             command=self.delete_current,
         ).pack(side=tk.RIGHT, padx=4)
         ctk.CTkButton(
             controls,
             text="COPY ẢNH (Ctrl+C)",
             width=145,
-            fg_color="#2471A3",
-            hover_color="#1F618D",
+            fg_color="#3B82F6",
+            hover_color="#2563EB",
             command=self.copy_current,
         ).pack(side=tk.RIGHT, padx=4)
 

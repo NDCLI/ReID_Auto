@@ -332,33 +332,38 @@ class AutoMarkerApp:
         # Configure appearance
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
+        self.root.configure(fg_color="#15181C")
 
         # Header bar (title + status dot)
         header = ctk.CTkFrame(self.root, fg_color="transparent")
-        header.pack(fill=tk.X, padx=14, pady=(12, 6))
+        header.pack(fill=tk.X, padx=16, pady=(16, 8))
 
         lbl_title = ctk.CTkLabel(
             header,
             text="📸 AUTOMARKER RE-ID",
-            font=("Segoe UI", 15, "bold"),
-            text_color="#3498DB",
+            font=("Segoe UI", 16, "bold"),
+            text_color="#E6EAF0",
         )
         lbl_title.pack(expand=True, pady=2)
 
         self.lbl_status = ctk.CTkLabel(
             header,
             text="● ĐANG DỪNG",
-            text_color="#E74C3C",
+            text_color="#FFFFFF",
+            fg_color="#EF4444",
+            corner_radius=8,
             font=("Segoe UI", 11, "bold"),
+            padx=10,
+            pady=4,
         )
         self.lbl_status.place(relx=1.0, rely=0.5, anchor="e")
 
         # Body: sidebar (left) + content (right)
         body = ctk.CTkFrame(self.root, fg_color="transparent")
-        body.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 12))
+        body.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
 
         # -------- SIDEBAR (left) --------
-        sidebar = ctk.CTkFrame(body, width=205, corner_radius=10, border_width=1, border_color="#34495E")
+        sidebar = ctk.CTkFrame(body, width=205, fg_color="#1E2228", corner_radius=12, border_width=1, border_color="#2A2F37")
         sidebar.pack(side=tk.LEFT, fill=tk.Y)
         sidebar.pack_propagate(False)
 
@@ -366,7 +371,7 @@ class AutoMarkerApp:
             sidebar,
             text="📁 THƯ MỤC MẪU",
             font=("Segoe UI", 10, "bold"),
-            text_color="#ECF0F1",
+            text_color="#E6EAF0",
         )
         lbl_side_folder.pack(anchor=tk.W, padx=12, pady=(12, 6))
 
@@ -386,7 +391,7 @@ class AutoMarkerApp:
         # tree holding many CTkButton items makes dragging the window laggy.
         # Native tk items have no canvas redraw cost on resize.
         # Use standard dark colors that match CTk's default dark theme
-        tree_bg = "#2B2B2B"
+        tree_bg = "#1E2228"
         tree_wrap = tk.Frame(sidebar, bg=tree_bg, bd=0, highlightthickness=0)
         tree_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
@@ -427,34 +432,39 @@ class AutoMarkerApp:
             toolbar,
             text="🔄 Làm Mới",
             width=86,
-            height=26,
+            height=30,
+            corner_radius=8,
+            font=("Segoe UI", 11, "bold"),
             command=self.update_queries_dropdown,
-            fg_color="#34495E",
-            hover_color="#2C3E50",
+            fg_color="#2A2F37",
+            hover_color="#353B45",
         ).pack(side=tk.LEFT, padx=(0, 6))
 
         ctk.CTkButton(
             toolbar,
             text="🗑 Xóa dữ liệu",
             width=96,
-            height=26,
+            height=30,
+            corner_radius=8,
+            font=("Segoe UI", 11, "bold"),
             command=self.clear_data,
-            fg_color="#E74C3C",
-            hover_color="#C0392B",
+            fg_color="#EF4444",
+            hover_color="#DC2626",
         ).pack(side=tk.LEFT, padx=(0, 6))
 
         ctk.CTkButton(
             toolbar,
             text="📚 Xem ảnh đã lưu",
             width=106,
-            height=26,
+            height=30,
+            corner_radius=8,
             command=self.open_library_window,
-            fg_color="#5D6D7E",
-            hover_color="#48586A",
+            fg_color="#2A2F37",
+            hover_color="#353B45",
             font=("Segoe UI", 10, "bold"),
         ).pack(side=tk.LEFT)
 
-        log_frame = tk.Frame(content, bg="#1E272C")
+        log_frame = tk.Frame(content, bg="#12151A")
         log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
         
         scrollbar = ctk.CTkScrollbar(log_frame)
@@ -462,14 +472,14 @@ class AutoMarkerApp:
 
         self.txt_logs = tk.Text(
             log_frame,
-            bg="#1E272C",
-            fg="#ECF0F1",
-            insertbackground="#ECF0F1",
+            bg="#12151A",
+            fg="#E6EAF0",
+            insertbackground="#E6EAF0",
             font=("Consolas", 10),
             relief="flat",
             bd=0,
-            padx=6,
-            pady=4,
+            padx=10,
+            pady=8,
             wrap="word",
             yscrollcommand=scrollbar.set,
             state="disabled"
@@ -488,8 +498,8 @@ class AutoMarkerApp:
             height=26,
             width=58,
             command=self.start_marker,
-            fg_color="#2ECC71",
-            hover_color="#27AE60",
+            fg_color="#22C55E",
+            hover_color="#16A34A",
         )
         # self.btn_start.pack(side=tk.LEFT, padx=(0, 4)) # Auto-start, hide button
 
@@ -501,8 +511,8 @@ class AutoMarkerApp:
             width=58,
             state="disabled",
             command=self.stop_marker,
-            fg_color="#E74C3C",
-            hover_color="#C0392B",
+            fg_color="#EF4444",
+            hover_color="#DC2626",
         )
         # self.btn_stop.pack(side=tk.LEFT, padx=(0, 8)) # Auto-start, hide button
 
@@ -518,11 +528,12 @@ class AutoMarkerApp:
         self.btn_next_capture_query = ctk.CTkButton(
             controls,
             text="Query trống",
-            height=26,
+            height=30,
+            corner_radius=8,
             width=100,
             command=self.select_next_empty_capture_query,
-            fg_color="#8E44AD",
-            hover_color="#71368A",
+            fg_color="#8B5CF6",
+            hover_color="#7C3AED",
             font=("Segoe UI", 10),
         )
         self.btn_next_capture_query.pack(side=tk.LEFT)
@@ -591,10 +602,10 @@ class AutoMarkerApp:
 
         active = os.path.basename(self.current_queries_dir)
         root_selected = self.current_queries_dir == QUERIES_DIR
-        hover_bg = "#3A3A3A"
-        normal_bg = "#2B2B2B"
-        selected_bg = "#1F538D"
-        normal_fg = "#DCE4EE"
+        hover_bg = "#262B33"
+        normal_bg = "#1E2228"
+        selected_bg = "#3B82F6"
+        normal_fg = "#E6EAF0"
         selected_fg = "#FFFFFF"
 
         def make_item(text, selected, command):
@@ -614,7 +625,7 @@ class AutoMarkerApp:
             label.bind(
                 "<Enter>",
                 lambda e, bg=label.cget("bg"): label.configure(
-                    bg=hover_bg, fg=selected_fg if selected else "#ECF0F1"
+                    bg=hover_bg, fg=selected_fg if selected else "#E6EAF0"
                 ),
             )
             label.bind(
@@ -856,7 +867,7 @@ class AutoMarkerApp:
         self.is_monitoring = True
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
-        self.lbl_status.configure(text="● ĐANG KHỞI TẠO AI...", text_color="#F39C12")
+        self.lbl_status.configure(text="● ĐANG KHỞI TẠO AI...", text_color="#FFFFFF", fg_color="#F59E0B")
         
         def _init_ai_thread():
             try:
@@ -898,7 +909,7 @@ class AutoMarkerApp:
                     # where a clipboard sequence number is unavailable.
                     self.last_clipboard_hash = get_clipboard_image_hash()
                     
-                    self.lbl_status.configure(text="● ĐANG CHẠY", text_color="#2ECC71")
+                    self.lbl_status.configure(text="● ĐANG CHẠY", text_color="#FFFFFF", fg_color="#22C55E")
                     self.poll_clipboard()
                     
                 self.root.after(0, _on_init_complete)
@@ -915,7 +926,7 @@ class AutoMarkerApp:
         self.is_monitoring = False
         self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
-        self.lbl_status.configure(text="● ĐANG DỪNG", text_color="#E74C3C")
+        self.lbl_status.configure(text="● ĐANG DỪNG", text_color="#FFFFFF", fg_color="#EF4444")
         print("\n⏹ Đã dừng tool vẽ khung.")
 
     def poll_clipboard(self):
@@ -1346,10 +1357,10 @@ class AutoMarkerApp:
             self.osd_window = tk.Toplevel(self.root)
             self.osd_window.overrideredirect(True)  # Borderless
             self.osd_window.attributes("-topmost", True)  # Always on top
-            self.osd_window.attributes("-alpha", 0.9)  # Semi-transparent
-            self.osd_window.configure(bg="#1E272C")
+            self.osd_window.attributes("-alpha", 0.92)  # Semi-transparent
+            self.osd_window.configure(bg="#1E2228")
             
-            self.osd_canvas = tk.Canvas(self.osd_window, highlightthickness=0, bg="#1E272C")
+            self.osd_canvas = tk.Canvas(self.osd_window, highlightthickness=0, bg="#1E2228")
             self.osd_canvas.pack(fill="both", expand=True)
         else:
             self.osd_canvas.delete("all")
@@ -1358,7 +1369,7 @@ class AutoMarkerApp:
         self.osd_window.geometry(f"{w}x{h}+{x}+{y}")
         
         # Draw mathematically perfect rounded rectangle inside canvas (inset by 2px)
-        self.draw_rounded_rect(self.osd_canvas, 2, 2, w - 2, h - 2, radius=12, fill="#1E272C", outline="#3498DB", width=2)
+        self.draw_rounded_rect(self.osd_canvas, 2, 2, w - 2, h - 2, radius=12, fill="#1E2228", outline="#3B82F6", width=2)
         
         # Draw text in the center
         self.osd_canvas.create_text(
@@ -1366,7 +1377,7 @@ class AutoMarkerApp:
             h // 2,
             text=text,
             font=("Segoe UI", 13, "bold"),
-            fill="#ECF0F1"
+            fill="#FFFFFF"
         )
         
         # Apply rounded corners to HWND (use same radius 12)
@@ -1390,8 +1401,8 @@ class AutoMarkerApp:
         self.osd_timer = self.root.after(1000, self.hide_osd)
 
     def draw_rounded_rect(self, canvas, x1, y1, x2, y2, radius=12, **kwargs):
-        fill = kwargs.get('fill', '#1E272C')
-        outline = kwargs.get('outline', '#3498DB')
+        fill = kwargs.get('fill', '#12151A')
+        outline = kwargs.get('outline', '#3B82F6')
         width = kwargs.get('width', 2)
         
         # Draw fill parts (no outlines)

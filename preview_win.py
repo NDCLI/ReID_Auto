@@ -56,17 +56,22 @@ class PreviewWindow(ctk.CTkToplevel):
         self.matcher = matcher
         self.output_dir = output_dir
         
+        self.configure(fg_color="#15181C")
+
         # Bottom Frame for Save/Cancel
         bot_frame = ctk.CTkFrame(self, fg_color="transparent")
-        bot_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=15, pady=10)
+        bot_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=16, pady=12)
         
         btn_cancel = ctk.CTkButton(
             bot_frame, 
             text="HỦY", 
             width=100,
+            height=30,
+            corner_radius=8,
+            font=("Segoe UI", 11, "bold"),
             command=self.destroy,
-            fg_color="#7F8C8D",
-            hover_color="#95A5A6"
+            fg_color="#2A2F37",
+            hover_color="#353B45"
         )
         btn_cancel.pack(side=tk.RIGHT, padx=5)
         
@@ -74,19 +79,21 @@ class PreviewWindow(ctk.CTkToplevel):
             bot_frame, 
             text="LƯU & COPY", 
             width=130,
+            height=30,
+            corner_radius=8,
             command=self.save_and_copy,
-            fg_color="#2ECC71",
-            hover_color="#27AE60",
+            fg_color="#22C55E",
+            hover_color="#16A34A",
             font=("Segoe UI", 11, "bold")
         )
         btn_save.pack(side=tk.RIGHT, padx=5)
         
         # Canvas Frame (with dark background and nice styling)
-        self.canvas_frame = ctk.CTkFrame(self, fg_color="#1E272C", corner_radius=10, border_width=1, border_color="#34495E")
-        self.canvas_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
+        self.canvas_frame = ctk.CTkFrame(self, fg_color="#12151A", corner_radius=12, border_width=1, border_color="#2A2F37")
+        self.canvas_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=6)
         
-        self.canvas = tk.Canvas(self.canvas_frame, bg="#1E272C", highlightthickness=0)
-        self.canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.canvas = tk.Canvas(self.canvas_frame, bg="#12151A", highlightthickness=0)
+        self.canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.canvas.bind("<ButtonPress-1>", self.on_canvas_press)
         
         # Right click to Save & Copy
