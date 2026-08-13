@@ -283,15 +283,18 @@ class AutoMarkerApp:
         except (tk.TclError, OSError, FileNotFoundError) as e:
             print(f"Không thể nạp icon ứng dụng: {e}")
         # Center the window on screen
-        w = 700
-        h = 560
+        # Keep enough vertical room for the log header and the capture
+        # destination card at the bottom.  A shorter window clips the
+        # "Chọn Query trống" button when the app is restored from the tray.
+        w = 760
+        h = 640
         ws = self.root.winfo_screenwidth()
         hs = self.root.winfo_screenheight()
         x = (ws - w) // 2
         y = (hs - h) // 2
         self.root.geometry(f"{w}x{h}+{x}+{y}")
         self.root.resizable(True, True)
-        self.root.minsize(620, 420)
+        self.root.minsize(680, 620)
         
         # Monitoring and Log state
         self.is_monitoring = False
@@ -313,6 +316,14 @@ class AutoMarkerApp:
         self.current_queries_dir = QUERIES_DIR
         
         self.setup_ui()
+        # Derive the minimum from the actual widget request after CTk has
+        # applied the current DPI/font scaling.  A hard-coded minimum can be
+        # too short on another display and let the bottom controls get clipped.
+        self.root.update_idletasks()
+        self.root.minsize(
+            max(680, self.root.winfo_reqwidth()),
+            max(620, self.root.winfo_reqheight() + 8),
+        )
         self.process_logs()
         
         # Tray Icon setup - dời lịch khởi chạy sau 1 giây
@@ -335,29 +346,148 @@ class AutoMarkerApp:
         ctk.set_default_color_theme("blue")
         self.root.configure(fg_color="#15181C")
 
-        # Header bar (title + status dot)
+        # Header bar (product identity + live state)
         header = ctk.CTkFrame(self.root, fg_color="transparent")
         header.pack(fill=tk.X, padx=16, pady=(16, 8))
 
-        lbl_title = ctk.CTkLabel(
-            header,
+        title_group = ctk.CTkFrame(header, fg_color="transparent")
+        title_group.pack(side=tk.LEFT)
+        ctk.CTkLabel(
+            title_group,
             text="📸 AUTOMARKER RE-ID",
             font=("Segoe UI", 16, "bold"),
             text_color="#E6EAF0",
-        )
-        lbl_title.pack(expand=True, pady=2)
+        ).pack(anchor=tk.W)
+        ctk.CTkLabel(
+            title_group,
+            text="Theo dõi Clipboard • Nhận diện và vẽ khung tự động",
+            font=("Segoe UI", 10),
+            text_color="#8E98A8",
+        ).pack(anchor=tk.W, pady=(1, 0))
 
         self.lbl_status = ctk.CTkLabel(
             header,
-            text="● ĐANG DỪNG",
-            text_color="#FFFFFF",
-            fg_color="#EF4444",
-            corner_radius=8,
-            font=("Segoe UI", 11, "bold"),
-            padx=10,
-            pady=4,
+            text="●",
+            text_color="#EF4444",
+            fg_color="transparent",
+            corner_radius=10,
+            font=("Segoe UI", 18, "bold"),
+            width=24,
+            height=24,
         )
-        self.lbl_status.place(relx=1.0, rely=0.5, anchor="e")
+        self.lbl_status.pack(side=tk.RIGHT)
+
+        # Compact single-row action bar.  Keeping all actions above the log
+        # prevents the last control from being clipped when the window gets
+        # shorter.
+        action_bar = ctk.CTkFrame(self.root, fg_color="transparent")
+        action_bar.pack(fill=tk.X, padx=16, pady=(0, 8))
+
+        ctk.CTkButton(
+            action_bar,
+            text="🔄 Làm mới + OCR",
+            width=130,
+            height=28,
+            corner_radius=7,
+            font=("Segoe UI", 9, "bold"),
+            command=self.refresh_and_rebuild_cache,
+            fg_color="#0EA5A3",
+            hover_color="#0C8886",
+        ).pack(side=tk.LEFT, padx=(0, 5))
+
+        ctk.CTkButton(
+            action_bar,
+            text="📚 Ảnh đã lưu",
+            width=100,
+            height=28,
+            corner_radius=7,
+            command=self.open_library_window,
+            fg_color="#2A2F37",
+            hover_color="#353B45",
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side=tk.LEFT, padx=(0, 5))
+
+        ctk.CTkButton(
+            action_bar,
+            text="Xóa log",
+            width=65,
+            height=28,
+            corner_radius=7,
+            command=self.clear_logs,
+            fg_color="transparent",
+            border_width=1,
+            border_color="#3A414C",
+            hover_color="#2A2F37",
+            font=("Segoe UI", 9),
+        ).pack(side=tk.LEFT, padx=(0, 5))
+
+        ctk.CTkButton(
+            action_bar,
+            text="🗑 Xóa Query",
+            width=100,
+            height=28,
+            corner_radius=7,
+            command=self.clear_data,
+            fg_color="transparent",
+            border_width=1,
+            border_color="#7F3540",
+            text_color="#FCA5A5",
+            hover_color="#3A2025",
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        ctk.CTkLabel(
+            action_bar,
+            text="LƯU:",
+            font=("Segoe UI", 9, "bold"),
+            text_color="#8E98A8",
+        ).pack(side=tk.LEFT, padx=(0, 4))
+
+        self.cmb_capture_query = ctk.CTkOptionMenu(
+            action_bar,
+            width=105,
+            height=28,
+            dynamic_resizing=False,
+            command=self.on_capture_query_selected,
+        )
+        self.cmb_capture_query.pack(side=tk.LEFT, padx=(0, 5))
+
+        self.btn_next_capture_query = ctk.CTkButton(
+            action_bar,
+            text="Query trống",
+            height=28,
+            corner_radius=7,
+            width=95,
+            command=self.select_next_empty_capture_query,
+            fg_color="#8B5CF6",
+            hover_color="#7C3AED",
+            font=("Segoe UI", 9, "bold"),
+        )
+        self.btn_next_capture_query.pack(side=tk.LEFT)
+
+        # These controls remain available for the existing start/stop code
+        # paths, but auto-start keeps them hidden from the compact toolbar.
+        self.btn_start = ctk.CTkButton(
+            action_bar,
+            text="▶ BẬT",
+            font=("Segoe UI", 10, "bold"),
+            height=26,
+            width=58,
+            command=self.start_marker,
+            fg_color="#22C55E",
+            hover_color="#16A34A",
+        )
+        self.btn_stop = ctk.CTkButton(
+            action_bar,
+            text="⏹ TẮT",
+            font=("Segoe UI", 10, "bold"),
+            height=26,
+            width=58,
+            state="disabled",
+            command=self.stop_marker,
+            fg_color="#EF4444",
+            hover_color="#DC2626",
+        )
 
         # Body: sidebar (left) + content (right)
         body = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -375,6 +505,14 @@ class AutoMarkerApp:
             text_color="#E6EAF0",
         )
         lbl_side_folder.pack(anchor=tk.W, padx=12, pady=(12, 6))
+
+        self.lbl_folder_summary = ctk.CTkLabel(
+            sidebar,
+            text="Đang tải danh sách...",
+            font=("Segoe UI", 9),
+            text_color="#8E98A8",
+        )
+        self.lbl_folder_summary.pack(anchor=tk.W, padx=12, pady=(0, 7))
 
         # The folder tree below is the primary picker. The OptionMenu is kept
         # unpacked only because the hotkey/tray code paths still call `.set()`
@@ -425,59 +563,27 @@ class AutoMarkerApp:
         content = ctk.CTkFrame(body, fg_color="transparent")
         content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(12, 0))
 
-        # Toolbar (top of content)
-        toolbar = ctk.CTkFrame(content, fg_color="transparent")
-        toolbar.pack(fill=tk.X, pady=(0, 6))
-
-        ctk.CTkButton(
-            toolbar,
-            text="🔄 Làm Mới",
-            width=86,
-            height=30,
-            corner_radius=8,
-            font=("Segoe UI", 11, "bold"),
-            command=self.update_queries_dropdown,
-            fg_color="#2A2F37",
-            hover_color="#353B45",
-        ).pack(side=tk.LEFT, padx=(0, 6))
-
-        ctk.CTkButton(
-            toolbar,
-            text="🗑 Xóa dữ liệu",
-            width=96,
-            height=30,
-            corner_radius=8,
-            font=("Segoe UI", 11, "bold"),
-            command=self.clear_data,
-            fg_color="#EF4444",
-            hover_color="#DC2626",
-        ).pack(side=tk.LEFT, padx=(0, 6))
-
-        ctk.CTkButton(
-            toolbar,
-            text="📚 Xem ảnh đã lưu",
-            width=106,
-            height=30,
-            corner_radius=8,
-            command=self.open_library_window,
-            fg_color="#2A2F37",
-            hover_color="#353B45",
+        log_header = ctk.CTkFrame(content, fg_color="transparent")
+        log_header.pack(fill=tk.X, pady=(1, 5))
+        ctk.CTkLabel(
+            log_header,
+            text="NHẬT KÝ HOẠT ĐỘNG",
             font=("Segoe UI", 10, "bold"),
+            text_color="#CBD2DC",
         ).pack(side=tk.LEFT)
+        ctk.CTkLabel(
+            log_header,
+            text="Tự cuộn theo sự kiện mới",
+            font=("Segoe UI", 9),
+            text_color="#687384",
+        ).pack(side=tk.RIGHT)
 
-        ctk.CTkButton(
-            toolbar,
-            text="🧹 Xóa cache & OCR lại",
-            width=150,
-            height=30,
-            corner_radius=8,
-            font=("Segoe UI", 10, "bold"),
-            command=self.rebuild_cache_and_reocr,
-            fg_color="#0EA5A3",
-            hover_color="#0C8886",
-        ).pack(side=tk.LEFT, padx=(6, 0))
-
-        log_frame = tk.Frame(content, bg="#12151A")
+        log_frame = tk.Frame(
+            content,
+            bg="#12151A",
+            highlightthickness=1,
+            highlightbackground="#2A2F37",
+        )
         log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
         
         scrollbar = ctk.CTkScrollbar(log_frame)
@@ -500,57 +606,6 @@ class AutoMarkerApp:
         self.txt_logs.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.configure(command=self.txt_logs.yview)
 
-        # Control bar (bottom of content) — single row: BẬT/TẮT + query picker
-        controls = ctk.CTkFrame(content, fg_color="transparent")
-        controls.pack(fill=tk.X)
-
-        self.btn_start = ctk.CTkButton(
-            controls,
-            text="▶ BẬT",
-            font=("Segoe UI", 10, "bold"),
-            height=26,
-            width=58,
-            command=self.start_marker,
-            fg_color="#22C55E",
-            hover_color="#16A34A",
-        )
-        # self.btn_start.pack(side=tk.LEFT, padx=(0, 4)) # Auto-start, hide button
-
-        self.btn_stop = ctk.CTkButton(
-            controls,
-            text="⏹ TẮT",
-            font=("Segoe UI", 10, "bold"),
-            height=26,
-            width=58,
-            state="disabled",
-            command=self.stop_marker,
-            fg_color="#EF4444",
-            hover_color="#DC2626",
-        )
-        # self.btn_stop.pack(side=tk.LEFT, padx=(0, 8)) # Auto-start, hide button
-
-        self.cmb_capture_query = ctk.CTkOptionMenu(
-            controls,
-            width=130,
-            height=26,
-            dynamic_resizing=False,
-            command=self.on_capture_query_selected,
-        )
-        self.cmb_capture_query.pack(side=tk.LEFT, padx=(0, 6))
-
-        self.btn_next_capture_query = ctk.CTkButton(
-            controls,
-            text="Query trống",
-            height=30,
-            corner_radius=8,
-            width=100,
-            command=self.select_next_empty_capture_query,
-            fg_color="#8B5CF6",
-            hover_color="#7C3AED",
-            font=("Segoe UI", 10),
-        )
-        self.btn_next_capture_query.pack(side=tk.LEFT)
-
         self.update_queries_dropdown()
         self.update_capture_query_dropdown()
 
@@ -572,7 +627,32 @@ class AutoMarkerApp:
             self._resize_job = self.root.after(80, self.root.update_idletasks)
 
         self.root.bind("<Configure>", _on_root_configure, add="+")
-        
+
+    def clear_logs(self):
+        """Clear the visible activity log and any messages waiting to render."""
+        while not self.log_queue.empty():
+            try:
+                self.log_queue.get_nowait()
+            except queue.Empty:
+                break
+        self.txt_logs.configure(state="normal")
+        self.txt_logs.delete("1.0", tk.END)
+        self.txt_logs.configure(state="disabled")
+
+    def _set_status_dot(self, color):
+        """Show only the color status dot; keep state details in the log."""
+        self.lbl_status.configure(
+            text="●",
+            text_color=color,
+            fg_color="transparent",
+        )
+
+    def refresh_and_rebuild_cache(self):
+        """Refresh Query folders, then offer to rebuild cache/OCR."""
+        self.update_queries_dropdown()
+        print("[UI] Đã làm mới danh sách Query. Chuẩn bị kiểm tra cache/OCR...")
+        self.rebuild_cache_and_reocr()
+
     def update_queries_dropdown(self):
         """Update the dropdown with subfolders in queries directory."""
         # Drop cache left behind by images that were deleted or moved out of a
@@ -617,6 +697,20 @@ class AutoMarkerApp:
         tree = getattr(self, "folder_tree", None)
         if tree is None:
             return
+
+        valid_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp')
+        image_total = 0
+        try:
+            for root_dir, dirs, files in os.walk(QUERIES_DIR):
+                dirs[:] = [name for name in dirs if name != ".cache"]
+                image_total += sum(name.lower().endswith(valid_exts) for name in files)
+        except OSError:
+            image_total = 0
+        if hasattr(self, "lbl_folder_summary"):
+            self.lbl_folder_summary.configure(
+                text=f"{len(folders)} thư mục  •  {image_total} ảnh mẫu"
+            )
+
         for widget in self._tree_inner.winfo_children():
             widget.destroy()
 
@@ -867,8 +961,8 @@ class AutoMarkerApp:
             )
             return
 
-        self.lbl_status.configure(
-            text="● ĐANG OCR LẠI...", text_color="#FFFFFF", fg_color="#F59E0B"
+        self._set_status_dot(
+            "#22C55E" if getattr(self, "is_monitoring", False) else "#EF4444"
         )
 
         def _reocr_thread():
@@ -886,11 +980,7 @@ class AutoMarkerApp:
                     self._matcher_query_image_cache = matcher.query_images
                     self._apply_matcher_query_selection()
                     running = getattr(self, "is_monitoring", False)
-                    self.lbl_status.configure(
-                        text="● ĐANG CHẠY" if running else "● ĐANG DỪNG",
-                        text_color="#FFFFFF",
-                        fg_color="#22C55E" if running else "#EF4444",
-                    )
+                    self._set_status_dot("#22C55E" if running else "#EF4444")
                     self.update_queries_dropdown()
                     messagebox.showinfo(
                         "Hoàn tất",
@@ -905,11 +995,7 @@ class AutoMarkerApp:
                 self.root.after(
                     0,
                     lambda: (
-                        self.lbl_status.configure(
-                            text="● ĐANG DỪNG",
-                            text_color="#FFFFFF",
-                            fg_color="#EF4444",
-                        ),
+                        self._set_status_dot("#EF4444"),
                         messagebox.showerror("Lỗi", f"Lỗi khi OCR lại: {e}"),
                     ),
                 )
@@ -972,6 +1058,7 @@ class AutoMarkerApp:
                     f"{deleted_cache} tệp cache OCR/feature và "
                     f"{deleted_outputs} tệp kết quả đã vẽ.",
                 )
+                self.update_queries_dropdown()
             except (OSError, PermissionError, IOError) as e:
                 messagebox.showerror("Lỗi", f"Lỗi khi xóa: {str(e)}")
 
@@ -1022,7 +1109,7 @@ class AutoMarkerApp:
         self.is_monitoring = True
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
-        self.lbl_status.configure(text="● ĐANG KHỞI TẠO AI...", text_color="#FFFFFF", fg_color="#F59E0B")
+        self._set_status_dot("#EF4444")
         
         def _init_ai_thread():
             try:
@@ -1064,7 +1151,7 @@ class AutoMarkerApp:
                     # where a clipboard sequence number is unavailable.
                     self.last_clipboard_hash = get_clipboard_image_hash()
                     
-                    self.lbl_status.configure(text="● ĐANG CHẠY", text_color="#FFFFFF", fg_color="#22C55E")
+                    self._set_status_dot("#22C55E")
                     self.poll_clipboard()
                     
                 self.root.after(0, _on_init_complete)
@@ -1081,7 +1168,7 @@ class AutoMarkerApp:
         self.is_monitoring = False
         self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
-        self.lbl_status.configure(text="● ĐANG DỪNG", text_color="#FFFFFF", fg_color="#EF4444")
+        self._set_status_dot("#EF4444")
         print("\n⏹ Đã dừng tool vẽ khung.")
 
     def _sync_clipboard_snapshot(self):

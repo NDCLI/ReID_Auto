@@ -592,6 +592,47 @@ class TestCardTimestampGate(unittest.TestCase):
         finally:
             am.extract_reference_timestamp = original
 
+    def _run_with_source(self, source_time, card_times, scores, references):
+        self.matcher.reference_timestamps = {"Query_1": references}
+        source_bbox = (1800, 10, 1880, 196)
+        self.matcher._detect_result_grid = lambda _image: [source_bbox]
+        matches = [
+            {
+                "bbox": (i * 100, 10, i * 100 + 80, 196),
+                "query": "Query_1",
+                "score": scores[i],
+            }
+            for i in range(len(card_times))
+        ]
+        self.screen.fill(0)
+        for i, match in enumerate(matches):
+            x1, y1, x2, y2 = match["bbox"]
+            self.screen[y1:y2, x1:x2] = i + 1
+        sx1, sy1, sx2, sy2 = source_bbox
+        self.screen[sy1:sy2, sx1:sx2] = 250
+
+        import auto_marker as am
+        original = am.extract_reference_timestamp
+
+        def fake_extract(crop):
+            marker = int(crop[0, 0, 0])
+            if marker == 250:
+                return source_time
+            return card_times[marker - 1]
+
+        am.extract_reference_timestamp = fake_extract
+        try:
+            from unittest.mock import patch
+
+            with patch_ocr_enabled(), patch.object(
+                am, "_snap_box_to_card", side_effect=lambda _gray, bbox: bbox
+            ):
+                return self.matcher._filter_matches_by_card_timestamp(
+                    matches, self.screen
+                )
+        finally:
+            am.extract_reference_timestamp = original
+
     def test_keeps_matching_and_unreadable_rejects_stranger(self):
         result = self._run(["12:12 PM", "11:43 AM", None, "11:32 AM"])
         kept_x = {m["bbox"][0] for m in result}
@@ -604,6 +645,28 @@ class TestCardTimestampGate(unittest.TestCase):
         self.matcher.reference_timestamps = {}
         result = self._run(["3:00 PM", "9:99 ZZ"])
         self.assertEqual(len(result), 2)
+
+    def test_different_source_time_still_limits_single_reference_timestamp(self):
+        result = self._run_with_source(
+            source_time="12:18 PM",
+            card_times=["12:05 PM", "12:05 PM", "12:05 PM", "12:20 PM"],
+            scores=[0.80, 0.95, 0.85, 0.90],
+            references=["12:20 PM", "12:18 PM", "12:05 PM", "12:04 PM", "12:04 PM"],
+        )
+
+        kept_x = {match["bbox"][0] for match in result}
+        self.assertEqual(kept_x, {100, 300})
+
+    def test_source_consumes_one_slot_from_its_timestamp(self):
+        result = self._run_with_source(
+            source_time="12:05 PM",
+            card_times=["12:05 PM", "12:05 PM"],
+            scores=[0.90, 0.95],
+            references=["12:05 PM", "12:05 PM"],
+        )
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["bbox"][0], 100)
 
 
 # ---------------------------------------------------------------------------

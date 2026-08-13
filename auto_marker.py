@@ -25,6 +25,7 @@ import io
 import json
 import ctypes
 import argparse
+from collections import Counter, defaultdict
 import numpy as np
 import cv2
 from PIL import Image, ImageGrab
@@ -818,18 +819,25 @@ class TemplateMatcher:
         return matches
 
     def _filter_matches_by_card_timestamp(self, matches, screenshot_bgr):
-        """Reject a match only when its own card time contradicts the query.
+        """Reject cards that contradict or exceed the reference time counts.
 
         OCR is an extra precision gate, not a requirement: it removes a card
         whose printed time is read confidently and matches no reference time
         for that identity (a different-time stranger the AI mistook for the
         same person). When the card time cannot be read, or the query has no
         reference timestamps, the card is kept and the AI score decides.
+
+        Each readable timestamp also has a quota equal to its occurrence count
+        in the Query folder. The source card consumes one slot from its own
+        timestamp. This generalizes the old source-only special case: even when
+        the source is 12:18 PM, a single 12:05 PM reference may produce at most
+        one 12:05 PM result card, never two or more.
         """
         if not (ENABLE_OCR_TIMESTAMP_FILTER and matches):
             return matches
 
         kept = []
+        timestamped_matches = defaultdict(list)
         
         grid_boxes = self._detect_result_grid(screenshot_bgr)
         source_ts = None
@@ -842,11 +850,29 @@ class TemplateMatcher:
             if source_ts:
                 log("OCR", f"Detected source query timestamp: {source_ts}")
 
+        def matching_reference_time(card_ts, ref_timestamps):
+            # Prefer an exact bucket when OCR produced the same normalized
+            # string. The tolerance fallback preserves the configured behavior
+            # if OCR_TIMESTAMP_TOLERANCE is increased later.
+            if card_ts in ref_timestamps:
+                return card_ts
+            return next(
+                (
+                    ref_ts for ref_ts in ref_timestamps
+                    if timestamps_match(
+                        card_ts,
+                        ref_ts,
+                        tolerance_minutes=OCR_TIMESTAMP_TOLERANCE,
+                    )
+                ),
+                None,
+            )
+
         def process_match(match):
             query_name = match.get("query")
             ref_timestamps = self.reference_timestamps.get(query_name)
             if not ref_timestamps:
-                return match, True
+                return match, True, None
 
             x1, y1, x2, y2 = match["bbox"]
             # Snap to the exact card boundaries to ensure the timestamp is included
@@ -855,46 +881,65 @@ class TemplateMatcher:
             crop = screenshot_bgr[max(0, cy1):max(0, cy2), max(0, cx1):max(0, cx2)]
             
             if crop.shape[0] < 10 or crop.shape[1] < 10:
-                return match, True
+                return match, True, None
 
             card_ts = match.get("card_timestamp") or extract_reference_timestamp(crop)
             if not card_ts:
                 # Unreadable time — do not reject, trust the AI score.
-                return match, True
+                return match, True, None
 
-            # Chỉ loại bỏ khi ảnh có mốc thời gian đó đang được dùng làm ảnh gốc (source query)
-            # VÀ thư mục mẫu chỉ có DUY NHẤT 1 ảnh ở mốc thời gian này.
-            # Nếu người dùng lưu >= 2 ảnh ở cùng mốc thời gian này, nghĩa là họ thực sự muốn tìm
-            # người này ở khoảng thời gian đó -> Bỏ qua lệnh loại bỏ, giữ lại để AI kiểm tra!
-            if source_ts and card_ts == source_ts:
-                if ref_timestamps.count(source_ts) == 1:
-                    log(
-                        "OCR",
-                        f"Rejected {query_name} card at x={x1}: time {card_ts} "
-                        f"trùng với ảnh gốc (chỉ có 1 ảnh mẫu giờ này -> người khác đi qua)."
-                    )
-                    return match, False
-
-            if any(
-                timestamps_match(card_ts, ref_ts,
-                                 tolerance_minutes=OCR_TIMESTAMP_TOLERANCE)
-                for ref_ts in ref_timestamps
-            ):
-                return match, True
-            else:
+            reference_time = matching_reference_time(card_ts, ref_timestamps)
+            if reference_time is None:
                 log(
                     "OCR",
                     f"Rejected {query_name} card at x={x1}: time {card_ts} "
                     f"not in references {sorted(set(ref_timestamps))}",
                 )
-                return match, False
+                return match, False, None
+
+            match["card_timestamp"] = card_ts
+            return match, True, (query_name, reference_time)
 
         with ThreadPoolExecutor() as executor:
             future_to_match = {executor.submit(process_match, m): m for m in matches}
             for future in as_completed(future_to_match):
-                match, is_kept = future.result()
-                if is_kept:
+                match, is_kept, timestamp_key = future.result()
+                if not is_kept:
+                    continue
+                if timestamp_key is None:
                     kept.append(match)
+                else:
+                    timestamped_matches[timestamp_key].append(match)
+
+        # Apply one quota per Query/timestamp after all OCR tasks finish. Keep
+        # the strongest AI candidates when several cards compete for one slot.
+        for (query_name, reference_time), candidates in timestamped_matches.items():
+            reference_counts = Counter(self.reference_timestamps.get(query_name, []))
+            quota = reference_counts[reference_time]
+            if source_ts and timestamps_match(
+                source_ts,
+                reference_time,
+                tolerance_minutes=OCR_TIMESTAMP_TOLERANCE,
+            ):
+                quota = max(0, quota - 1)
+
+            candidates.sort(
+                key=lambda item: (
+                    item.get("score", 0.0),
+                    item.get("pixel_score", 0.0),
+                ),
+                reverse=True,
+            )
+            kept.extend(candidates[:quota])
+            rejected_count = max(0, len(candidates) - quota)
+            if rejected_count:
+                log(
+                    "OCR",
+                    f"Rejected {rejected_count} {query_name} card(s) at "
+                    f"{reference_time}: quota={quota} from "
+                    f"{reference_counts[reference_time]} reference image(s)"
+                    + (" (source consumed 1)" if quota < reference_counts[reference_time] else ""),
+                )
                     
         if ENABLE_OCR_TIMESTAMP_FILTER:
             log(

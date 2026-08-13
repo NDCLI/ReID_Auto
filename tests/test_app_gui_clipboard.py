@@ -1,8 +1,9 @@
 """Regression tests for review-window clipboard state handling."""
 
 from types import SimpleNamespace
+import queue
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import app_gui
 
@@ -59,3 +60,19 @@ class TestReviewClipboardSync(unittest.TestCase):
 
         self.assertEqual(self.app.last_clipboard_hash, "hash-2")
         hash_mock.assert_called_once()
+
+
+class TestMainWindowControls(unittest.TestCase):
+    def setUp(self):
+        self.app = app_gui.AutoMarkerApp.__new__(app_gui.AutoMarkerApp)
+
+    def test_clear_logs_removes_pending_and_visible_messages(self):
+        self.app.log_queue = queue.Queue()
+        self.app.log_queue.put("pending")
+        self.app.txt_logs = MagicMock()
+
+        self.app.clear_logs()
+
+        self.assertTrue(self.app.log_queue.empty())
+        self.app.txt_logs.delete.assert_called_once_with("1.0", "end")
+        self.assertEqual(self.app.txt_logs.configure.call_count, 2)
