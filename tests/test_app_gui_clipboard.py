@@ -18,6 +18,14 @@ class _FakePreviewWindow:
         return not self.closed
 
 
+class _FakeRoot:
+    def __init__(self):
+        self.callbacks = []
+
+    def after(self, delay, callback):
+        self.callbacks.append((delay, callback))
+
+
 class TestReviewClipboardSync(unittest.TestCase):
     def setUp(self):
         self.app = app_gui.AutoMarkerApp.__new__(app_gui.AutoMarkerApp)
@@ -62,6 +70,99 @@ class TestReviewClipboardSync(unittest.TestCase):
         hash_mock.assert_called_once()
 
 
+class TestClipboardCaptureRetry(unittest.TestCase):
+    def test_transient_unreadable_sharex_image_is_retried(self):
+        app = app_gui.AutoMarkerApp.__new__(app_gui.AutoMarkerApp)
+        app.root = _FakeRoot()
+        app.matcher = SimpleNamespace(ignore_next_clipboard=False)
+        app.is_monitoring = True
+        app.is_processing = False
+        app.active_preview_window = None
+        app.last_clipboard_sequence = 1
+        app.last_clipboard_hash = None
+        app.pending_clipboard_sequence = None
+        app.pending_clipboard_hash = None
+        app.pending_clipboard_retries = 0
+        app.clipboard_image_retry_limit = 10
+        app.clipboard_poll_ms = 100
+        app.process_clipboard_image = MagicMock()
+
+        with patch.object(
+            app_gui, "get_clipboard_sequence_number", side_effect=[2, 2]
+        ), patch.object(
+            app_gui, "get_clipboard_image", side_effect=[None, "sharex-image"]
+        ), patch.object(
+            app_gui, "get_clipboard_owner_process_name", return_value="sharex.exe"
+        ), patch.object(app_gui.threading, "Thread") as thread_mock:
+            app.poll_clipboard()
+            self.assertEqual(app.last_clipboard_sequence, 1)
+            self.assertEqual(app.pending_clipboard_sequence, 2)
+            self.assertEqual(app.pending_clipboard_retries, 1)
+            thread_mock.assert_not_called()
+
+            app.poll_clipboard()
+
+        self.assertEqual(app.last_clipboard_sequence, 2)
+        self.assertIsNone(app.pending_clipboard_sequence)
+        thread_mock.assert_called_once()
+        thread_mock.return_value.start.assert_called_once()
+
+    def test_excel_foreground_does_not_block_sharex_owned_image(self):
+        app = app_gui.AutoMarkerApp.__new__(app_gui.AutoMarkerApp)
+        app.root = _FakeRoot()
+        app.matcher = SimpleNamespace(ignore_next_clipboard=False)
+        app.is_monitoring = True
+        app.is_processing = False
+        app.active_preview_window = None
+        app.last_clipboard_sequence = 1
+        app.last_clipboard_hash = None
+        app.pending_clipboard_sequence = None
+        app.pending_clipboard_hash = None
+        app.pending_clipboard_retries = 0
+        app.clipboard_image_retry_limit = 10
+        app.clipboard_poll_ms = 100
+
+        with patch.object(
+            app_gui, "get_clipboard_sequence_number", return_value=2
+        ), patch.object(
+            app_gui, "get_clipboard_image", return_value="sharex-image"
+        ), patch.object(
+            app_gui, "get_clipboard_owner_process_name", return_value="sharex.exe"
+        ), patch.object(app_gui.threading, "Thread") as thread_mock:
+            app.poll_clipboard()
+
+        self.assertEqual(app.last_clipboard_sequence, 2)
+        thread_mock.assert_called_once()
+        thread_mock.return_value.start.assert_called_once()
+
+    def test_excel_owned_image_is_still_ignored(self):
+        app = app_gui.AutoMarkerApp.__new__(app_gui.AutoMarkerApp)
+        app.root = _FakeRoot()
+        app.matcher = SimpleNamespace(ignore_next_clipboard=False)
+        app.is_monitoring = True
+        app.is_processing = False
+        app.active_preview_window = None
+        app.last_clipboard_sequence = 1
+        app.last_clipboard_hash = None
+        app.pending_clipboard_sequence = None
+        app.pending_clipboard_hash = None
+        app.pending_clipboard_retries = 0
+        app.clipboard_image_retry_limit = 10
+        app.clipboard_poll_ms = 100
+
+        with patch.object(
+            app_gui, "get_clipboard_sequence_number", return_value=2
+        ), patch.object(
+            app_gui, "get_clipboard_image", return_value="excel-image"
+        ), patch.object(
+            app_gui, "get_clipboard_owner_process_name", return_value="excel.exe"
+        ), patch.object(app_gui.threading, "Thread") as thread_mock:
+            app.poll_clipboard()
+
+        self.assertEqual(app.last_clipboard_sequence, 2)
+        thread_mock.assert_not_called()
+
+
 class TestMainWindowControls(unittest.TestCase):
     def setUp(self):
         self.app = app_gui.AutoMarkerApp.__new__(app_gui.AutoMarkerApp)
@@ -76,3 +177,19 @@ class TestMainWindowControls(unittest.TestCase):
         self.assertTrue(self.app.log_queue.empty())
         self.app.txt_logs.delete.assert_called_once_with("1.0", "end")
         self.assertEqual(self.app.txt_logs.configure.call_count, 2)
+
+    def test_tray_menu_has_no_pause_or_resume_control(self):
+        captured_items = []
+
+        def fake_menu_item(text, *args, **kwargs):
+            captured_items.append(text)
+            return text
+
+        app = app_gui.AutoMarkerApp.__new__(app_gui.AutoMarkerApp)
+        with patch.object(app_gui.pystray, "MenuItem", side_effect=fake_menu_item), patch.object(
+            app_gui.pystray, "Menu", side_effect=lambda *items: items
+        ):
+            app.create_tray_menu()
+
+        self.assertFalse(any("Tạm dừng" in str(item) for item in captured_items))
+        self.assertFalse(any("Tiếp tục" in str(item) for item in captured_items))

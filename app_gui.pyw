@@ -34,11 +34,13 @@ from library_win import LibraryWindow
 from preview_win import PreviewWindow
 from query_organizer import QueryAutoCollector, MAX_QUERY_COUNT
 
-def get_foreground_process_name():
-    """Return the lowercase exe name of the foreground window's process.
+def get_clipboard_owner_process_name():
+    """Return the lowercase exe name that owns the current clipboard.
 
-    Returns an empty string if it can't be determined. Used to skip clipboard
-    processing when another app (e.g. Excel running a copy macro) is active.
+    The active window is not a reliable source signal: ShareX often copies an
+    image while the user is still working in Excel. Clipboard ownership lets us
+    ignore an Excel copy macro without dropping a ShareX capture made from an
+    Excel-focused workflow.
     """
     try:
         import ctypes
@@ -70,7 +72,8 @@ def get_foreground_process_name():
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CloseHandle.restype = wintypes.BOOL
 
-        hwnd = user32.GetForegroundWindow()
+        user32.GetClipboardOwner.restype = wintypes.HWND
+        hwnd = user32.GetClipboardOwner()
         if not hwnd:
             return ""
         process_id = wintypes.DWORD()
@@ -92,10 +95,12 @@ def get_foreground_process_name():
         return ""
 
 
-# Foreground processes whose clipboard activity should not trigger auto-processing.
-# Excel copy macros (e.g. CopyAnh) push image shapes onto the clipboard, which the
-# monitor would otherwise mistake for new Re-ID screenshots and auto-open Review.
-CLIPBOARD_IGNORE_PROCESSES = {"excel.exe"}
+# Clipboard owners whose image activity should not trigger auto-processing.
+# Excel copy macros (e.g. CopyAnh) push image shapes onto the clipboard, which
+# the monitor would otherwise mistake for new Re-ID screenshots and auto-open
+# Review. Do not use the foreground app here: ShareX can copy while Excel stays
+# focused.
+CLIPBOARD_IGNORE_OWNER_PROCESSES = {"excel.exe"}
 
 
 class RedirectStdout:
@@ -139,7 +144,6 @@ class GlobalHotkeyManager:
         # Hotkey IDs
         HOTKEY_PREV = 100
         HOTKEY_NEXT = 101
-        HOTKEY_TOGGLE = 102
         HOTKEY_NEW_CAPTURE_QUERY = 103
         HOTKEY_NUM_BASE = 200 # 200 to 209 for 0 to 9
         
@@ -159,8 +163,6 @@ class GlobalHotkeyManager:
         register(HOTKEY_NEXT, MODS, 0x44, "Ctrl+Shift+D")
         register(HOTKEY_NUM_BASE + 0, MODS, 0x51, "Ctrl+Shift+Q")
 
-        # Ctrl+Shift+Space (Pause/Resume Toggle)
-        register(HOTKEY_TOGGLE, MODS, 0x20, "Ctrl+Shift+Space")
         # MOD_NOREPEAT (0x4000) prevents one long press from skipping through
         # several empty Query slots.
         register(
@@ -202,7 +204,6 @@ class GlobalHotkeyManager:
             # Unregister all hotkeys
             user32.UnregisterHotKey(None, HOTKEY_PREV)
             user32.UnregisterHotKey(None, HOTKEY_NEXT)
-            user32.UnregisterHotKey(None, HOTKEY_TOGGLE)
             user32.UnregisterHotKey(None, HOTKEY_NEW_CAPTURE_QUERY)
             for i in range(10):
                 user32.UnregisterHotKey(None, HOTKEY_NUM_BASE + i)
@@ -236,14 +237,6 @@ class GlobalHotkeyManager:
         elif hotkey_id == 101: # NEXT
             new_index = (current_index + 1) % len(all_options)
             self._select_index(all_options, new_index)
-        elif hotkey_id == 102: # TOGGLE (Pause/Resume)
-            if self.app.is_monitoring:
-                self.app.stop_marker()
-                self.app.show_osd("🔴 ĐÃ TẠM DỪNG VẼ KHUNG")
-            else:
-                self.app.start_marker()
-                if self.app.is_monitoring:
-                    self.app.show_osd("🟢 ĐÃ TIẾP TỤC VẼ KHUNG")
         elif hotkey_id == 103: # Space in Blaze or global Shift+Space
             self.app.select_next_empty_capture_query()
         elif 200 <= hotkey_id <= 209: # Ctrl+Shift+Q or 1 to 9
@@ -301,6 +294,13 @@ class AutoMarkerApp:
         self.log_queue = queue.Queue()
         self.last_clipboard_hash = None
         self.last_clipboard_sequence = None
+        # ShareX can publish the clipboard sequence before the image payload
+        # is readable. Keep that event pending and retry briefly instead of
+        # consuming it permanently on the first failed read.
+        self.pending_clipboard_sequence = None
+        self.pending_clipboard_hash = None
+        self.pending_clipboard_retries = 0
+        self.clipboard_image_retry_limit = 10
         self.clipboard_poll_ms = max(50, int(round(POLL_INTERVAL * 1000)))
         self.is_processing = False
         self.active_preview_window = None
@@ -464,30 +464,6 @@ class AutoMarkerApp:
             font=("Segoe UI", 9, "bold"),
         )
         self.btn_next_capture_query.pack(side=tk.LEFT)
-
-        # These controls remain available for the existing start/stop code
-        # paths, but auto-start keeps them hidden from the compact toolbar.
-        self.btn_start = ctk.CTkButton(
-            action_bar,
-            text="▶ BẬT",
-            font=("Segoe UI", 10, "bold"),
-            height=26,
-            width=58,
-            command=self.start_marker,
-            fg_color="#22C55E",
-            hover_color="#16A34A",
-        )
-        self.btn_stop = ctk.CTkButton(
-            action_bar,
-            text="⏹ TẮT",
-            font=("Segoe UI", 10, "bold"),
-            height=26,
-            width=58,
-            state="disabled",
-            command=self.stop_marker,
-            fg_color="#EF4444",
-            hover_color="#DC2626",
-        )
 
         # Body: sidebar (left) + content (right)
         body = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -1107,8 +1083,6 @@ class AutoMarkerApp:
             )
 
         self.is_monitoring = True
-        self.btn_start.configure(state="disabled")
-        self.btn_stop.configure(state="normal")
         self._set_status_dot("#EF4444")
         
         def _init_ai_thread():
@@ -1135,7 +1109,7 @@ class AutoMarkerApp:
                 
                 def _on_init_complete():
                     if not getattr(self, 'is_monitoring', False):
-                        return # Cancelled during init
+                        return  # Application is shutting down during init.
                     
                     self.matcher = matcher
                     self._matcher_reference_cache = self.matcher.reference_images
@@ -1159,17 +1133,15 @@ class AutoMarkerApp:
                 import traceback
                 traceback.print_exc()
                 print(f"\n❌ Lỗi khởi tạo AI: {str(e)}")
-                self.root.after(0, self.stop_marker)
+                self.root.after(0, self._handle_monitoring_startup_error)
 
         import threading
         threading.Thread(target=_init_ai_thread, daemon=True).start()
 
-    def stop_marker(self):
+    def _handle_monitoring_startup_error(self):
+        """Show failed startup without exposing a manual pause control."""
         self.is_monitoring = False
-        self.btn_start.configure(state="normal")
-        self.btn_stop.configure(state="disabled")
         self._set_status_dot("#EF4444")
-        print("\n⏹ Đã dừng tool vẽ khung.")
 
     def _sync_clipboard_snapshot(self):
         """Consume the current clipboard state without triggering processing."""
@@ -1208,31 +1180,62 @@ class AutoMarkerApp:
         try:
             sequence = get_clipboard_sequence_number()
             clipboard_changed = False
+            current_hash = None
             if sequence is not None:
                 if sequence != self.last_clipboard_sequence:
-                    self.last_clipboard_sequence = sequence
+                    if self.pending_clipboard_sequence != sequence:
+                        self.pending_clipboard_sequence = sequence
+                        self.pending_clipboard_retries = 0
                     clipboard_changed = True
+                else:
+                    self.pending_clipboard_sequence = None
+                    self.pending_clipboard_retries = 0
             else:
                 # Compatibility fallback: hashing is more expensive, but is
                 # only needed when Windows cannot provide a sequence number.
                 current_hash = get_clipboard_image_hash()
                 if current_hash is not None and current_hash != self.last_clipboard_hash:
-                    self.last_clipboard_hash = current_hash
+                    if self.pending_clipboard_hash != current_hash:
+                        self.pending_clipboard_hash = current_hash
+                        self.pending_clipboard_retries = 0
                     clipboard_changed = True
+                else:
+                    self.pending_clipboard_hash = None
+                    self.pending_clipboard_retries = 0
 
             if clipboard_changed:
                 # Check if we should ignore this change (triggered by our own Save & Copy)
                 if getattr(self.matcher, 'ignore_next_clipboard', False):
                     self.matcher.ignore_next_clipboard = False
+                    if sequence is not None:
+                        self.last_clipboard_sequence = sequence
+                        self.pending_clipboard_sequence = None
+                    elif current_hash is not None:
+                        self.last_clipboard_hash = current_hash
+                        self.pending_clipboard_hash = None
+                    self.pending_clipboard_retries = 0
                     print("  [INFO] Ignoring clipboard change triggered by Preview Save.")
                 else:
                     pil_img = get_clipboard_image()
                     if pil_img is not None:
-                        if get_foreground_process_name() in CLIPBOARD_IGNORE_PROCESSES:
-                            # An Excel copy macro (or similar) is pushing an
-                            # image. The sequence is recorded above, so it will
-                            # not retrigger after Excel loses focus.
-                            print("  [INFO] Ignoring clipboard change from Excel (copy macro).")
+                        # Commit the clipboard token only after the payload
+                        # is readable. This prevents a transient ShareX
+                        # clipboard lock from losing the first capture.
+                        if sequence is not None:
+                            self.last_clipboard_sequence = sequence
+                            self.pending_clipboard_sequence = None
+                        elif current_hash is not None:
+                            self.last_clipboard_hash = current_hash
+                            self.pending_clipboard_hash = None
+                        self.pending_clipboard_retries = 0
+                        if (
+                            get_clipboard_owner_process_name()
+                            in CLIPBOARD_IGNORE_OWNER_PROCESSES
+                        ):
+                            # An Excel copy macro (or similar) owns the image.
+                            # The sequence is recorded above, so it will not
+                            # retrigger after another window gains focus.
+                            print("  [INFO] Ignoring clipboard image owned by Excel (copy macro).")
                         else:
                             detected_at = time.perf_counter()
                             print("  [DETECT] New image found in clipboard.")
@@ -1243,6 +1246,31 @@ class AutoMarkerApp:
                                 args=(pil_img, detected_at),
                                 daemon=True,
                             ).start()
+                    else:
+                        # The sequence changed, but ShareX may still be
+                        # publishing CF_DIB/PNG. Retry on the next poll before
+                        # deciding that this clipboard change is non-image.
+                        self.pending_clipboard_retries = getattr(
+                            self, "pending_clipboard_retries", 0
+                        ) + 1
+                        if self.pending_clipboard_retries == 1:
+                            print(
+                                "  [CLIPBOARD] Ảnh chưa sẵn sàng; đang thử đọc lại..."
+                            )
+                        if self.pending_clipboard_retries >= getattr(
+                            self, "clipboard_image_retry_limit", 10
+                        ):
+                            if sequence is not None:
+                                self.last_clipboard_sequence = sequence
+                                self.pending_clipboard_sequence = None
+                            elif current_hash is not None:
+                                self.last_clipboard_hash = current_hash
+                                self.pending_clipboard_hash = None
+                            self.pending_clipboard_retries = 0
+                            print(
+                                "  [CLIPBOARD] Bỏ qua thay đổi clipboard sau khi "
+                                "retry nhưng không đọc được ảnh."
+                            )
         except (OSError, ValueError, TypeError) as e:
             print(f"  [CLIPBOARD POLL ERROR] {e}")
             
@@ -1515,23 +1543,10 @@ class AutoMarkerApp:
         return pystray.Menu(
             pystray.MenuItem('DefaultAction', self.on_tray_left_click, default=True, visible=False),
             pystray.MenuItem('Hiện ứng dụng', self.show_window),
-            pystray.MenuItem(lambda item: "⏹ Tạm dừng vẽ khung" if self.is_monitoring else "▶ Tiếp tục vẽ khung", self.toggle_monitoring_from_menu),
             pystray.MenuItem('Chọn nhanh Folder', pystray.Menu(lambda: self.get_folder_menu_items())),
             pystray.MenuItem('Khởi động lại', self.restart_app),
             pystray.MenuItem('Thoát ứng dụng', self.quit_app)
         )
-
-    def toggle_monitoring_from_menu(self, icon=None, item=None):
-        self.root.after(0, self.actual_toggle_monitoring)
-        
-    def actual_toggle_monitoring(self):
-        if self.is_monitoring:
-            self.stop_marker()
-            self.show_osd("🔴 ĐÃ TẠM DỪNG VẼ KHUNG")
-        else:
-            self.start_marker()
-            if self.is_monitoring:
-                self.show_osd("🟢 ĐÃ TIẾP TỤC VẼ KHUNG")
 
     def get_folder_menu_items(self):
         if not os.path.exists(QUERIES_DIR):
