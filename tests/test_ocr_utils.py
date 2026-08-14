@@ -15,8 +15,10 @@ class _FakeRapidResult:
 class _FakeRapidEngine:
     def __init__(self, results):
         self.results = iter(results)
+        self.calls = []
 
-    def __call__(self, _image):
+    def __call__(self, _image, **kwargs):
+        self.calls.append(kwargs)
         return next(self.results, _FakeRapidResult(None))
 
 
@@ -65,6 +67,28 @@ class TestSmallCardOCR(unittest.TestCase):
         ocr_utils._WINOCR_AVAILABLE = False
 
         self.assertIsNone(ocr_utils.extract_reference_timestamp(self.image))
+
+    def test_card_ocr_skips_detection_and_classification(self):
+        engine = _FakeRapidEngine([_FakeRapidResult("12:15 PM", 0.95)])
+        ocr_utils._RAPIDOCR_AVAILABLE = True
+        ocr_utils._RAPIDOCR_ENGINE = engine
+
+        self.assertEqual(
+            ocr_utils.extract_reference_timestamp(self.image),
+            "12:15 PM",
+        )
+        self.assertEqual(
+            engine.calls[0],
+            {"use_det": False, "use_cls": False, "use_rec": True},
+        )
+
+    def test_card_ocr_starts_with_tight_timestamp_bands(self):
+        variants = list(ocr_utils._rapidocr_variants(self.image))
+
+        # 196px * 18%, 28%, and 20%, each enlarged 8x. The order is a
+        # regression guard for the real 1:55 PM card that wider bands read as
+        # the unparseable string "1:5PM".
+        self.assertEqual([v.shape[0] for v in variants[:3]], [288, 440, 320])
 
 
 class TestTimestampMatching(unittest.TestCase):

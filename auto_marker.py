@@ -25,6 +25,7 @@ import io
 import json
 import ctypes
 import argparse
+from collections import Counter, defaultdict
 import numpy as np
 import cv2
 from PIL import Image, ImageGrab
@@ -37,7 +38,8 @@ from config import (
     CLICK_BOX_MIN_SIZE,
     IGNORE_LEFT_RATIO, IGNORE_BOTTOM_RATIO, AI_MATCH_THRESHOLD,
     AI_MATCH_MARGIN, AI_BEST_REFERENCE_THRESHOLD, AI_TOP_K_REFERENCES,
-    AI_REQUIRE_MODEL_AGREEMENT,
+    AI_REQUIRE_MODEL_AGREEMENT, AI_TIME_RESCUE_SCORE_FLOOR,
+    AI_TIME_RESCUE_MARGIN,
     ENFORCE_SINGLE_QUERY, AUTO_CALIBRATION, AUTO_PIXEL_THRESHOLD,
     AUTO_AI_THRESHOLD_FLOOR, AUTO_AI_THRESHOLD_CEILING,
     AUTO_AI_THRESHOLD_TOLERANCE,
@@ -46,6 +48,7 @@ from config import (
     FAST_ROOT_MAX_ROWS, FACE_FEATURE_NAME, FACE_MATCH_THRESHOLD, FACE_MATCH_MARGIN,
     FACE_MIN_REFERENCES, TEMPLATE_REFS_PER_QUERY,
     ENABLE_OCR_TIMESTAMP_FILTER, OCR_TIMESTAMP_TOLERANCE, OCR_METHOD,
+    VERBOSE_LOGGING,
 )
 from ocr_utils import extract_timestamp, extract_reference_timestamp, timestamps_match
 
@@ -54,7 +57,17 @@ from ocr_utils import extract_timestamp, extract_reference_timestamp, timestamps
 # LOGGING HELPER
 # ============================================================
 def log(tag: str, message: str) -> None:
-    """Print a timestamped log message."""
+    """Print a timestamped log message.
+
+    Diagnostic/profiling tags are hidden unless VERBOSE_LOGGING is enabled in
+    config, so the on-screen log stays focused on what the user needs
+    (kết quả quét, số khung, trạng thái OCR, cảnh báo/lỗi).
+    """
+    if not VERBOSE_LOGGING and tag in (
+        "PERF", "CALIBRATE", "REF", "QUERY", "MATCH",
+        "IDENTIFY", "SCAN", "DETECT", "DEBUG", "INFO",
+    ):
+        return
     timestamp = datetime.datetime.now().strftime("%H:%M:%S")
     print(f"  [{timestamp}] [{tag}] {message}")
 
@@ -198,7 +211,7 @@ class TemplateMatcher:
                         img = cv2.imread(img_path)
                         if img is not None:
                             self.query_images[query_name] = img
-                            log("QUERY", f"{query_name}/{img_file} (excluded from matching)")
+                            # log("QUERY", f"{query_name}/{img_file} (excluded from matching)")
                         continue
 
                     # Feature Caching
@@ -258,7 +271,7 @@ class TemplateMatcher:
                         ref_timestamps_for_query.append(ref_ts)
 
                     ts_info = f" | OCR: {ref_ts}" if ref_ts else ""
-                    log("REF", f"{query_name}/{img_file} ({img.shape[1]}x{img.shape[0]}){ts_info}")
+                    # log("REF", f"{query_name}/{img_file} ({img.shape[1]}x{img.shape[0]}){ts_info}")
                     time.sleep(0.005)  # Yield CPU to keep GUI responsive
 
                 # Store ALL timestamps for this query (each ref may be at a different time)
@@ -288,7 +301,7 @@ class TemplateMatcher:
                     
                 if self._is_query_image(item_name):
                     self.query_images[query_name] = img
-                    log("QUERY", f"Root/{item_name} (excluded from matching)")
+                    # log("QUERY", f"Root/{item_name} (excluded from matching)")
                 else:
                     cache_dir = os.path.join(queries_dir, ".cache")
                     os.makedirs(cache_dir, exist_ok=True)
@@ -311,13 +324,15 @@ class TemplateMatcher:
                             pass
                             
                     self.reference_images[query_name].append((item_name, img, feat))
-                    log("REF", f"Root/{item_name} ({img.shape[1]}x{img.shape[0]})")
+                    # log("REF", f"Root/{item_name} ({img.shape[1]}x{img.shape[0]})")
                 time.sleep(0.005)  # Yield CPU to keep GUI responsive
 
         total_refs = sum(len(refs) for refs in self.reference_images.values())
         total_queries = len(self.reference_images)
         print("  " + "-" * 50)
         log("INIT", f"Loaded {total_refs} reference images from {total_queries} queries")
+        if ENABLE_OCR_TIMESTAMP_FILTER:
+            log("OCR", f"Đã đọc xong thời gian trên {total_refs} ảnh mẫu.")
         self._calibrate_query_thresholds()
 
     def _calibrate_query_thresholds(self):
@@ -346,21 +361,27 @@ class TemplateMatcher:
 
             self.query_thresholds[query_name] = threshold
             if pair_scores:
-                log(
-                    "CALIBRATE",
-                    f"{query_name}: AI threshold={threshold:.3f}, "
-                    f"intra range={min(pair_scores):.3f}-{max(pair_scores):.3f}",
-                )
+                # log(
+                # "CALIBRATE",
+                # f"{query_name}: AI threshold={threshold:.3f}, "
+                # f"intra range={min(pair_scores):.3f}-{max(pair_scores):.3f}",
+                # )
+                pass
             else:
-                log("CALIBRATE", f"{query_name}: AI threshold={threshold:.3f} (need 2+ refs)")
+                # log("CALIBRATE", f"{query_name}: AI threshold={threshold:.3f} (need 2+ refs)")
+                pass
 
-    def _classify_candidate(self, candidate_bgr):
+    def _classify_candidate(self, candidate_bgr, allow_time_rescue=False):
         """Classify a crop against every identity using open-set rejection."""
         candidate_features = self.ai_extractor.extract_feature(candidate_bgr)
         if not candidate_features:
             return None
 
-        return self._classify_features(candidate_features)
+        classification = self._classify_features(
+            candidate_features,
+            allow_time_rescue=allow_time_rescue,
+        )
+        return self._confirm_time_rescue(classification, candidate_bgr)
 
     def _classify_face_features(self, candidate_features):
         """Use a confident face match to rescue clothing-change cases."""
@@ -398,7 +419,7 @@ class TemplateMatcher:
         best["threshold"] = float(FACE_MATCH_THRESHOLD)
         return best
 
-    def _classify_features(self, candidate_features):
+    def _classify_features(self, candidate_features, allow_time_rescue=False):
         """Apply the normal ensemble/open-set policy to existing embeddings."""
 
         face_result = self._classify_face_features(candidate_features)
@@ -457,29 +478,40 @@ class TemplateMatcher:
         identity_threshold = self.query_thresholds.get(best['query'], AI_MATCH_THRESHOLD)
 
         # Log chi tiết top-2 để debug khi vẽ nhầm/bỏ sót
-        log(
-            "AI",
-            f"Top1: {best['query']} ({best['score']:.3f}) vs "
-            f"Top2: {second_query} ({second_score:.3f}), "
-            f"margin={margin:.3f} (cần≥{AI_MATCH_MARGIN:.3f}), "
-            f"thresh={identity_threshold:.3f}",
-        )
+        # log(
+        #     "AI",
+        #     f"Top1: {best['query']} ({best['score']:.3f}) vs "
+        #     f"Top2: {second_query} ({second_score:.3f}), "
+        #     f"margin={margin:.3f} (cần≥{AI_MATCH_MARGIN:.3f}), "
+        #     f"thresh={identity_threshold:.3f}",
+        # )
 
-        if best['score'] < identity_threshold or margin < AI_MATCH_MARGIN:
-            if margin < AI_MATCH_MARGIN and best['score'] >= identity_threshold:
-                log(
-                    "REJECT",
-                    f"Margin quá nhỏ ({margin:.3f}<{AI_MATCH_MARGIN:.3f}): "
-                    f"{best['query']} vs {second_query} — bỏ qua để tránh nhầm",
-                )
+        below_identity_threshold = best['score'] < identity_threshold
+        if margin < AI_MATCH_MARGIN:
+            if best['score'] >= identity_threshold:
+                # log(
+                # "REJECT",
+                # f"Margin quá nhỏ ({margin:.3f}<{AI_MATCH_MARGIN:.3f}): "
+                # f"{best['query']} vs {second_query} — bỏ qua để tránh nhầm",
+                # )
+                pass
+            return face_result
+
+        pending_time_rescue = (
+            below_identity_threshold
+            and allow_time_rescue
+            and best['score'] >= AI_TIME_RESCUE_SCORE_FLOOR
+            and margin >= AI_TIME_RESCUE_MARGIN
+        )
+        if below_identity_threshold and not pending_time_rescue:
             return face_result
 
         if best['best_reference_score'] < AI_BEST_REFERENCE_THRESHOLD:
-            log(
-                "REJECT",
-                f"Ảnh tham chiếu tốt nhất {best['best_reference_score']:.3f}"
-                f"<{AI_BEST_REFERENCE_THRESHOLD:.3f}; loại ứng viên mơ hồ",
-            )
+            # log(
+            # "REJECT",
+            # f"Ảnh tham chiếu tốt nhất {best['best_reference_score']:.3f}"
+            # f"<{AI_BEST_REFERENCE_THRESHOLD:.3f}; loại ứng viên mơ hồ",
+            # )
             return face_result
 
         if AI_REQUIRE_MODEL_AGREEMENT and len(per_model_winners) > 1:
@@ -490,11 +522,59 @@ class TemplateMatcher:
             if winners and any(winner != best['query'] for winner in winners):
                 return face_result
 
+        if pending_time_rescue and face_result is not None:
+            return face_result
+
         best['margin'] = float(margin)
         best['threshold'] = float(identity_threshold)
         best['reference_threshold'] = float(AI_BEST_REFERENCE_THRESHOLD)
         best['source'] = "body"
+        if pending_time_rescue:
+            best['_needs_time_confirmation'] = True
         return best
+
+    def _confirm_time_rescue(self, classification, candidate_bgr):
+        """Confirm a near-threshold body match with an exact card timestamp."""
+        if not classification or not classification.pop(
+            '_needs_time_confirmation', False
+        ):
+            return classification
+
+        query_name = classification.get('query')
+        reference_times = self.reference_timestamps.get(query_name, [])
+        card_timestamp = extract_reference_timestamp(candidate_bgr)
+        if not card_timestamp or not reference_times:
+            # log(
+            # "REJECT",
+            # f"Near-threshold {query_name} lacks a readable matching time",
+            # )
+            return None
+
+        exact_match = any(
+            timestamps_match(
+                card_timestamp,
+                reference_time,
+                tolerance_minutes=OCR_TIMESTAMP_TOLERANCE,
+            )
+            for reference_time in reference_times
+        )
+        if not exact_match:
+            # log(
+            # "REJECT",
+            # f"Near-threshold {query_name} time {card_timestamp} "
+            # f"not in references {sorted(set(reference_times))}",
+            # )
+            return None
+
+        classification['card_timestamp'] = card_timestamp
+        classification['time_rescue'] = True
+        log(
+            "RESCUE",
+            f"Accepted near-threshold {query_name}: "
+            f"score={classification['score']:.3f}, "
+            f"margin={classification['margin']:.3f}, time={card_timestamp}",
+        )
+        return classification
 
     def _rank_features(self, candidate_features, model_names=None):
         """Rank identities for a precomputed feature set without rejection."""
@@ -643,7 +723,11 @@ class TemplateMatcher:
             )
             # Reuse the normal conservative open-set classifier policy, but
             # avoid recomputing the already extracted primary embedding.
-            classification = self._classify_features(features)
+            classification = self._classify_features(
+                features,
+                allow_time_rescue=True,
+            )
+            classification = self._confirm_time_rescue(classification, crop)
             if classification:
                 classification.update({
                     "bbox": bbox,
@@ -653,8 +737,9 @@ class TemplateMatcher:
                 matches.append(classification)
 
         matches = self._filter_matches_by_card_timestamp(matches, screenshot_bgr)
-        # Keep the same single-identity policy as the full scan so that cards
-        # of a secondary identity cannot exceed the per-folder N-1 cap.
+        # The domain guarantees one target identity per screenshot. Fast-grid
+        # classifies cards independently, so enforce the same dominant-Query
+        # policy used by the full scan before applying each folder's N-1 cap.
         if ENFORCE_SINGLE_QUERY:
             matches = dominant_query_only(matches)
         matches = self._limit_and_align_matches(matches)
@@ -687,7 +772,27 @@ class TemplateMatcher:
                     ),
                     reverse=True,
                 )
-                limited.extend(query_matches[:max_boxes])
+                drawn = query_matches[:max_boxes]
+                limited.extend(drawn)
+                # Concise per-query summary: how many boxes were drawn vs the
+                # maximum possible (reference count - 1, since one image is the
+                # source), plus the reason when fewer boxes were drawn.
+                ref_count = len(self.reference_images.get(query_name, []))
+                n_drawn = len(drawn)
+                if max_boxes > 0 and n_drawn < max_boxes:
+                    log(
+                        "KHUNG",
+                        f"{query_name}: vẽ {n_drawn}/{max_boxes} khung "
+                        f"(thư mục có {ref_count} ảnh mẫu). Thiếu "
+                        f"{max_boxes - n_drawn} khung: không tìm đủ đối tượng "
+                        f"khớp trong ảnh quét (bị AI/OCR loại hoặc không xuất hiện).",
+                    )
+                else:
+                    log(
+                        "KHUNG",
+                        f"{query_name}: vẽ {n_drawn}/{max_boxes} khung "
+                        f"(thư mục có {ref_count} ảnh mẫu).",
+                    )
             matches = limited
 
         if not matches:
@@ -714,18 +819,25 @@ class TemplateMatcher:
         return matches
 
     def _filter_matches_by_card_timestamp(self, matches, screenshot_bgr):
-        """Reject a match only when its own card time contradicts the query.
+        """Reject cards that contradict or exceed the reference time counts.
 
         OCR is an extra precision gate, not a requirement: it removes a card
         whose printed time is read confidently and matches no reference time
         for that identity (a different-time stranger the AI mistook for the
         same person). When the card time cannot be read, or the query has no
         reference timestamps, the card is kept and the AI score decides.
+
+        Each readable timestamp also has a quota equal to its occurrence count
+        in the Query folder. The source card consumes one slot from its own
+        timestamp. This generalizes the old source-only special case: even when
+        the source is 12:18 PM, a single 12:05 PM reference may produce at most
+        one 12:05 PM result card, never two or more.
         """
         if not (ENABLE_OCR_TIMESTAMP_FILTER and matches):
             return matches
 
         kept = []
+        timestamped_matches = defaultdict(list)
         
         grid_boxes = self._detect_result_grid(screenshot_bgr)
         source_ts = None
@@ -738,11 +850,29 @@ class TemplateMatcher:
             if source_ts:
                 log("OCR", f"Detected source query timestamp: {source_ts}")
 
+        def matching_reference_time(card_ts, ref_timestamps):
+            # Prefer an exact bucket when OCR produced the same normalized
+            # string. The tolerance fallback preserves the configured behavior
+            # if OCR_TIMESTAMP_TOLERANCE is increased later.
+            if card_ts in ref_timestamps:
+                return card_ts
+            return next(
+                (
+                    ref_ts for ref_ts in ref_timestamps
+                    if timestamps_match(
+                        card_ts,
+                        ref_ts,
+                        tolerance_minutes=OCR_TIMESTAMP_TOLERANCE,
+                    )
+                ),
+                None,
+            )
+
         def process_match(match):
             query_name = match.get("query")
             ref_timestamps = self.reference_timestamps.get(query_name)
             if not ref_timestamps:
-                return match, True
+                return match, True, None
 
             x1, y1, x2, y2 = match["bbox"]
             # Snap to the exact card boundaries to ensure the timestamp is included
@@ -751,47 +881,72 @@ class TemplateMatcher:
             crop = screenshot_bgr[max(0, cy1):max(0, cy2), max(0, cx1):max(0, cx2)]
             
             if crop.shape[0] < 10 or crop.shape[1] < 10:
-                return match, True
+                return match, True, None
 
-            card_ts = extract_reference_timestamp(crop)
+            card_ts = match.get("card_timestamp") or extract_reference_timestamp(crop)
             if not card_ts:
                 # Unreadable time — do not reject, trust the AI score.
-                return match, True
+                return match, True, None
 
-            # Chỉ loại bỏ khi ảnh có mốc thời gian đó đang được dùng làm ảnh gốc (source query)
-            # VÀ thư mục mẫu chỉ có DUY NHẤT 1 ảnh ở mốc thời gian này.
-            # Nếu người dùng lưu >= 2 ảnh ở cùng mốc thời gian này, nghĩa là họ thực sự muốn tìm
-            # người này ở khoảng thời gian đó -> Bỏ qua lệnh loại bỏ, giữ lại để AI kiểm tra!
-            if source_ts and card_ts == source_ts:
-                if ref_timestamps.count(source_ts) == 1:
-                    log(
-                        "OCR",
-                        f"Rejected {query_name} card at x={x1}: time {card_ts} "
-                        f"trùng với ảnh gốc (chỉ có 1 ảnh mẫu giờ này -> người khác đi qua)."
-                    )
-                    return match, False
-
-            if any(
-                timestamps_match(card_ts, ref_ts,
-                                 tolerance_minutes=OCR_TIMESTAMP_TOLERANCE)
-                for ref_ts in ref_timestamps
-            ):
-                return match, True
-            else:
+            reference_time = matching_reference_time(card_ts, ref_timestamps)
+            if reference_time is None:
                 log(
                     "OCR",
                     f"Rejected {query_name} card at x={x1}: time {card_ts} "
                     f"not in references {sorted(set(ref_timestamps))}",
                 )
-                return match, False
+                return match, False, None
+
+            match["card_timestamp"] = card_ts
+            return match, True, (query_name, reference_time)
 
         with ThreadPoolExecutor() as executor:
             future_to_match = {executor.submit(process_match, m): m for m in matches}
             for future in as_completed(future_to_match):
-                match, is_kept = future.result()
-                if is_kept:
+                match, is_kept, timestamp_key = future.result()
+                if not is_kept:
+                    continue
+                if timestamp_key is None:
                     kept.append(match)
+                else:
+                    timestamped_matches[timestamp_key].append(match)
+
+        # Apply one quota per Query/timestamp after all OCR tasks finish. Keep
+        # the strongest AI candidates when several cards compete for one slot.
+        for (query_name, reference_time), candidates in timestamped_matches.items():
+            reference_counts = Counter(self.reference_timestamps.get(query_name, []))
+            quota = reference_counts[reference_time]
+            if source_ts and timestamps_match(
+                source_ts,
+                reference_time,
+                tolerance_minutes=OCR_TIMESTAMP_TOLERANCE,
+            ):
+                quota = max(0, quota - 1)
+
+            candidates.sort(
+                key=lambda item: (
+                    item.get("score", 0.0),
+                    item.get("pixel_score", 0.0),
+                ),
+                reverse=True,
+            )
+            kept.extend(candidates[:quota])
+            rejected_count = max(0, len(candidates) - quota)
+            if rejected_count:
+                log(
+                    "OCR",
+                    f"Rejected {rejected_count} {query_name} card(s) at "
+                    f"{reference_time}: quota={quota} from "
+                    f"{reference_counts[reference_time]} reference image(s)"
+                    + (" (source consumed 1)" if quota < reference_counts[reference_time] else ""),
+                )
                     
+        if ENABLE_OCR_TIMESTAMP_FILTER:
+            log(
+                "OCR",
+                f"OCR xong: giữ {len(kept)}/{len(matches)} khung sau khi "
+                f"kiểm tra thời gian trên thẻ.",
+            )
         return kept
 
     def _remove_source_grid_match(self, matches, screenshot_bgr):
@@ -946,18 +1101,18 @@ class TemplateMatcher:
                 best_score = folder_best
                 best_folder = query_name
 
-            log("IDENTIFY",
-                f"{query_name}: source-card match score = {folder_best:.3f}")
+            # log("IDENTIFY",
+            # f"{query_name}: source-card match score = {folder_best:.3f}")
 
         if best_folder and best_score >= 0.5:
-            log("IDENTIFY",
-                f"Source card belongs to {best_folder} "
-                f"(score={best_score:.3f})")
+            # log("IDENTIFY",
+            # f"Source card belongs to {best_folder} "
+            # f"(score={best_score:.3f})")
             return best_folder
         else:
-            log("IDENTIFY",
-                f"No confident match for source card "
-                f"(best={best_folder}, score={best_score:.3f})")
+            # log("IDENTIFY",
+            # f"No confident match for source card "
+            # f"(best={best_folder}, score={best_score:.3f})")
             return None
 
     def _identify_query_by_source_ai(self, screenshot_bgr):
@@ -988,18 +1143,18 @@ class TemplateMatcher:
         try:
             classification = self._classify_candidate(source_crop)
         except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
-            log("IDENTIFY", f"Source-card AI identification failed: {exc}")
+            # log("IDENTIFY", f"Source-card AI identification failed: {exc}")
             return None
 
         query_name = classification.get("query") if classification else None
         if query_name not in self.reference_images:
             return None
 
-        log(
-            "IDENTIFY",
-            f"Source card belongs to {query_name} by AI "
-            f"(score={classification.get('score', 0.0):.3f})",
-        )
+        # log(
+        # "IDENTIFY",
+        # f"Source card belongs to {query_name} by AI "
+        # f"(score={classification.get('score', 0.0):.3f})",
+        # )
         return query_name
 
     def _find_matches_inner(self, screenshot_bgr, screenshot_timestamp):
@@ -1020,8 +1175,8 @@ class TemplateMatcher:
             )
         else:
             probe_count = active_count
-        log("PERF", f"Matching with {len(self.reference_images)} folder(s), "
-            f"{active_count} ref(s), template probes={probe_count}")
+        # log("PERF", f"Matching with {len(self.reference_images)} folder(s), "
+        # f"{active_count} ref(s), template probes={probe_count}")
 
         if FAST_ROOT_MODE:
             original_fast_refs = self.reference_images
@@ -1030,18 +1185,18 @@ class TemplateMatcher:
                 self.reference_images = {
                     identified_fast_query: original_fast_refs[identified_fast_query]
                 }
-                log(
-                    "PERF",
-                    f"Fast Root scoped to {identified_fast_query} using source card",
-                )
+                # log(
+                # "PERF",
+                # f"Fast Root scoped to {identified_fast_query} using source card",
+                # )
             try:
                 fast_matches = self._find_matches_fast_root(screenshot_bgr)
             finally:
                 self.reference_images = original_fast_refs
             if fast_matches is not None:
-                log("PERF", f"Fast grid done in {_time.time()-_t0:.1f}s")
+                # log("PERF", f"Fast grid done in {_time.time()-_t0:.1f}s")
                 return fast_matches
-            log("PERF", f"Fast grid fallback after {_time.time()-_t0:.1f}s")
+            # log("PERF", f"Fast grid fallback after {_time.time()-_t0:.1f}s")
 
         # --- SOURCE-CARD FOLDER IDENTIFICATION ---
         # When ENFORCE_SINGLE_QUERY is on and multiple folders are loaded,
@@ -1057,13 +1212,14 @@ class TemplateMatcher:
             identified_folder = self._identify_query_folder(screenshot_bgr)
             if identified_folder and identified_folder in self.reference_images:
                 scan_refs = {identified_folder: self.reference_images[identified_folder]}
-                log("PERF",
-                    f"Source-card identification: {identified_folder} "
-                    f"in {_time.time()-_t_id:.1f}s — scanning only this folder")
+                # log("PERF",
+                # f"Source-card identification: {identified_folder} "
+                # f"in {_time.time()-_t_id:.1f}s — scanning only this folder")
             else:
-                log("PERF",
-                    f"Source-card identification failed "
-                    f"({_time.time()-_t_id:.1f}s) — scanning all folders")
+                # log("PERF",
+                # f"Source-card identification failed "
+                # f"({_time.time()-_t_id:.1f}s) — scanning all folders")
+                pass
 
         gray_screen = cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2GRAY)
         screen_h, screen_w = gray_screen.shape[:2]
@@ -1089,8 +1245,8 @@ class TemplateMatcher:
                     'score': 1.0,
                     'scale': 1.0,
                 })
-            log("PERF", f"Grid proposal: {len(all_matches)} card(s) "
-                f"in {_time.time()-_t0:.1f}s")
+            # log("PERF", f"Grid proposal: {len(all_matches)} card(s) "
+            # f"in {_time.time()-_t0:.1f}s")
 
         if not all_matches:
             for query_name, refs in scan_refs.items():
@@ -1150,8 +1306,8 @@ class TemplateMatcher:
                 )[:MAX_PIXEL_CANDIDATES]
 
             _t1 = _time.time()
-            log("PERF", f"Candidates: {len(all_matches)} "
-                f"in {_t1-_t0:.1f}s")
+            # log("PERF", f"Candidates: {len(all_matches)} "
+            # f"in {_t1-_t0:.1f}s")
 
             verified_matches = []
             
@@ -1160,7 +1316,10 @@ class TemplateMatcher:
                 candidate_bgr = screenshot_bgr[y:y2, x:x2]
                 if candidate_bgr.shape[0] < 10 or candidate_bgr.shape[1] < 10:
                     return None
-                classification = self._classify_candidate(candidate_bgr)
+                classification = self._classify_candidate(
+                    candidate_bgr,
+                    allow_time_rescue=True,
+                )
                 if classification:
                     m_copy = dict(m)
                     m_copy.update(classification)
@@ -1175,8 +1334,8 @@ class TemplateMatcher:
                         verified_matches.append(result)
 
             all_matches = verified_matches
-            log("PERF", f"AI classify: {len(all_matches)} verified "
-                f"in {_time.time()-_t1:.1f}s")
+            # log("PERF", f"AI classify: {len(all_matches)} verified "
+            # f"in {_time.time()-_t1:.1f}s")
 
         if ENFORCE_SINGLE_QUERY:
             all_matches = dominant_query_only(all_matches)
@@ -1410,35 +1569,6 @@ def draw_match_boxes(image_bgr: np.ndarray, matches: list[dict]) -> np.ndarray:
 # ============================================================
 # CLIPBOARD UTILITIES
 # ============================================================
-def is_actual_screenshot() -> bool:
-    """Verify if the clipboard data looks like a pure screenshot (no HTML/URL metadata formats)."""
-    try:
-        blocked_keywords = ("html", "url", "chrome", "link", "mime")
-        win32clipboard.OpenClipboard()
-        try:
-            fmt = 0
-            while True:
-                fmt = win32clipboard.EnumClipboardFormats(fmt)
-                if fmt == 0:
-                    break
-                try:
-                    name = win32clipboard.GetClipboardFormatName(fmt)
-                    name_lower = name.lower()
-                    if any(kw in name_lower for kw in blocked_keywords):
-                        return False
-                except Exception:
-                    # GetClipboardFormatName raises pywintypes.error for
-                    # standard/system format IDs — safe to skip them.
-                    pass
-        finally:
-            win32clipboard.CloseClipboard()
-    except Exception:
-        # OpenClipboard / EnumClipboardFormats can also raise
-        # pywintypes.error when the clipboard is locked by another app.
-        pass
-    return True
-
-
 def get_clipboard_image_win32() -> Image.Image | list[str] | None:
     try:
         win32clipboard.OpenClipboard()
@@ -1493,10 +1623,13 @@ def get_clipboard_image_win32() -> Image.Image | list[str] | None:
 
 
 def get_clipboard_image() -> Image.Image | None:
-    """Get current image from clipboard, returns PIL Image or None."""
-    if not is_actual_screenshot():
-        return None
-        
+    """Return a readable clipboard image, regardless of companion formats.
+
+    ShareX can publish an image together with HTML, URL, or MIME clipboard
+    formats.  Those labels describe additional representations of the same
+    capture, not an invalid image.  Image extraction itself is therefore the
+    only reliable acceptance check here.
+    """
     try:
         img = ImageGrab.grabclipboard()
         if img is not None:
@@ -1538,6 +1671,11 @@ def _get_clipboard_sequence_number() -> int | None:
         return None
 
 
+def get_clipboard_sequence_number() -> int | None:
+    """Return the cheap Windows clipboard generation used by the GUI poller."""
+    return _get_clipboard_sequence_number()
+
+
 def _clipboard_token(payload: bytes) -> str:
     """Hash image bytes and include clipboard generation when available."""
     digest = hashlib.md5(payload).hexdigest()
@@ -1551,9 +1689,8 @@ def get_clipboard_image_hash() -> str | None:
     The Windows sequence number matters because ShareX can recapture the same
     region, producing identical pixels but a new clipboard event.
     """
-    if not is_actual_screenshot():
-        return None
-        
+    # Do not blacklist the image because ShareX also supplies HTML/URL/MIME
+    # representations.  The image read below is the authoritative check.
     try:
         img = ImageGrab.grabclipboard()
         if img is not None:

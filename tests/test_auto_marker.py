@@ -250,6 +250,78 @@ class TestBestReferenceRejection(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Exact-time rescue for stable near-threshold body matches
+# ---------------------------------------------------------------------------
+class TestTimeVerifiedNearThresholdRescue(unittest.TestCase):
+    def setUp(self):
+        self.matcher = auto_marker.TemplateMatcher.__new__(
+            auto_marker.TemplateMatcher
+        )
+        self.matcher.ai_extractor = _FakeExtractor()
+        self.matcher.query_thresholds = {
+            "Query_1": 0.65,
+            "Query_2": 0.65,
+        }
+        self.matcher.reference_images = {
+            "Query_1": [
+                ("target_a.png", None, {"score": 0.63}),
+                ("target_b.png", None, {"score": 0.62}),
+            ],
+            "Query_2": [
+                ("other_a.png", None, {"score": 0.40}),
+                ("other_b.png", None, {"score": 0.39}),
+            ],
+        }
+        self.matcher.reference_timestamps = {"Query_1": ["12:22 PM"]}
+        self.candidate = {"fake_model": np.ones(1)}
+        self.crop = np.zeros((190, 80, 3), dtype=np.uint8)
+
+    def _pending(self):
+        return self.matcher._classify_features(
+            self.candidate,
+            allow_time_rescue=True,
+        )
+
+    def _confirm_with_time(self, timestamp):
+        original = auto_marker.extract_reference_timestamp
+        auto_marker.extract_reference_timestamp = lambda _crop: timestamp
+        try:
+            return self.matcher._confirm_time_rescue(
+                self._pending(), self.crop
+            )
+        finally:
+            auto_marker.extract_reference_timestamp = original
+
+    def test_normal_policy_still_rejects_score_below_global_threshold(self):
+        result = self.matcher._classify_features(self.candidate)
+
+        self.assertIsNone(result)
+
+    def test_exact_query_time_rescues_stable_near_threshold_match(self):
+        result = self._confirm_with_time("12:22 PM")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["query"], "Query_1")
+        self.assertTrue(result["time_rescue"])
+        self.assertEqual(result["card_timestamp"], "12:22 PM")
+        self.assertAlmostEqual(result["score"], 0.625)
+
+    def test_different_time_does_not_rescue_near_threshold_match(self):
+        self.assertIsNone(self._confirm_with_time("1:55 PM"))
+
+    def test_unreadable_time_does_not_rescue_near_threshold_match(self):
+        self.assertIsNone(self._confirm_with_time(None))
+
+    def test_score_below_rescue_floor_is_not_pending(self):
+        self.matcher.reference_images["Query_1"] = [
+            ("target_a.png", None, {"score": 0.61}),
+            ("target_b.png", None, {"score": 0.60}),
+        ]
+
+        self.assertIsNone(self._pending())
+
+
+# ---------------------------------------------------------------------------
 # Accepted-match alignment and fast-root card retention
 # ---------------------------------------------------------------------------
 class TestAcceptedMatchRetention(unittest.TestCase):
@@ -302,7 +374,7 @@ class TestAcceptedMatchRetention(unittest.TestCase):
         self.matcher._rank_features = lambda _features, _models: [
             {"score": 0.9}
         ]
-        self.matcher._classify_features = lambda _features: {
+        self.matcher._classify_features = lambda _features, **_kwargs: {
             "query": "Query_1",
             "ref_name": "ref_0.png",
             "score": 0.9,
@@ -346,7 +418,6 @@ class TestAcceptedMatchRetention(unittest.TestCase):
         self.matcher._rank_features = lambda _features, _models: [
             {"score": 0.9}
         ]
-
         from unittest.mock import patch
 
         primary = {
@@ -369,7 +440,7 @@ class TestAcceptedMatchRetention(unittest.TestCase):
         }
         calls = {"n": 0}
 
-        def classify(features):
+        def classify(features, **_kwargs):
             calls["n"] += 1
             result = dict(intruder if calls["n"] == 1 else primary)
             result["bbox"] = (calls["n"] * 100, 10, calls["n"] * 100 + 80, 196)
@@ -387,6 +458,48 @@ class TestAcceptedMatchRetention(unittest.TestCase):
             "secondary identity card must be dropped before the N-1 cap",
         )
         self.assertEqual(len(result), 5)
+
+    def test_fast_root_drops_secondary_query_before_result_cap(self):
+        """A high-scoring card from another Query must not draw a box."""
+        boxes = [
+            (index * 100, 10, index * 100 + 80, 196)
+            for index in range(5)
+        ]
+
+        class FakeFastExtractor:
+            models = {auto_marker.FAST_ROOT_PRIMARY_MODEL}
+            active_models = (auto_marker.FAST_ROOT_PRIMARY_MODEL,)
+            face_model = None
+
+            @staticmethod
+            def extract_feature(_crop, model_names=None):
+                return {name: np.ones(1) for name in (model_names or ())}
+
+        self.matcher.ai_extractor = FakeFastExtractor()
+        self.matcher._detect_result_grid = lambda _image: boxes
+        self.matcher._rank_features = lambda _features, _models: [
+            {"score": 0.9}
+        ]
+        self.matcher.reference_images = {
+            "Query_3": [(f"q3_{i}.png", None, {}) for i in range(4)],
+            "Query_13": [(f"q13_{i}.png", None, {}) for i in range(4)],
+        }
+
+        calls = {"count": 0}
+
+        def classify(_features, **_kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return {"query": "Query_13", "score": 0.95}
+            return {"query": "Query_3", "score": 0.75}
+
+        self.matcher._classify_features = classify
+        result = self.matcher._find_matches_fast_root(
+            np.zeros((220, 500, 3), dtype=np.uint8)
+        )
+
+        self.assertEqual(len(result), 3)
+        self.assertEqual({match["query"] for match in result}, {"Query_3"})
 
 
 class TestFastRootSourceScoping(unittest.TestCase):
@@ -441,6 +554,9 @@ class TestCardTimestampGate(unittest.TestCase):
         self.matcher.reference_timestamps = {
             "Query_1": ["12:12 PM", "11:43 AM", "11:44 AM", "12:15 PM"]
         }
+        # This suite exercises only the per-result timestamp gate. Source-card
+        # timestamp handling has its own tests and would consume an OCR value.
+        self.matcher._detect_result_grid = lambda _image: []
         self.screen = np.zeros((300, 2000, 3), dtype=np.uint8)
 
     def _run(self, card_times):
@@ -449,20 +565,68 @@ class TestCardTimestampGate(unittest.TestCase):
              "score": 0.9}
             for i in range(len(card_times))
         ]
-        # Stub the card-crop OCR to return the scripted time for each match in
-        # order (matches are processed sequentially in the helper).
+        # Encode the expected OCR result into each crop so the test remains
+        # deterministic while production OCR runs concurrently.
+        self.screen.fill(0)
+        for i, match in enumerate(matches):
+            x1, y1, x2, y2 = match["bbox"]
+            self.screen[y1:y2, x1:x2] = i + 1
+
         import auto_marker as am
         original = am.extract_reference_timestamp
-        calls = {"i": 0}
 
-        def fake_extract(_crop):
-            time = card_times[calls["i"]]
-            calls["i"] += 1
-            return time
+        def fake_extract(crop):
+            index = int(crop[0, 0, 0]) - 1
+            return card_times[index]
 
         am.extract_reference_timestamp = fake_extract
         try:
-            with patch_ocr_enabled():
+            from unittest.mock import patch
+
+            with patch_ocr_enabled(), patch.object(
+                am, "_snap_box_to_card", side_effect=lambda _gray, bbox: bbox
+            ):
+                return self.matcher._filter_matches_by_card_timestamp(
+                    matches, self.screen
+                )
+        finally:
+            am.extract_reference_timestamp = original
+
+    def _run_with_source(self, source_time, card_times, scores, references):
+        self.matcher.reference_timestamps = {"Query_1": references}
+        source_bbox = (1800, 10, 1880, 196)
+        self.matcher._detect_result_grid = lambda _image: [source_bbox]
+        matches = [
+            {
+                "bbox": (i * 100, 10, i * 100 + 80, 196),
+                "query": "Query_1",
+                "score": scores[i],
+            }
+            for i in range(len(card_times))
+        ]
+        self.screen.fill(0)
+        for i, match in enumerate(matches):
+            x1, y1, x2, y2 = match["bbox"]
+            self.screen[y1:y2, x1:x2] = i + 1
+        sx1, sy1, sx2, sy2 = source_bbox
+        self.screen[sy1:sy2, sx1:sx2] = 250
+
+        import auto_marker as am
+        original = am.extract_reference_timestamp
+
+        def fake_extract(crop):
+            marker = int(crop[0, 0, 0])
+            if marker == 250:
+                return source_time
+            return card_times[marker - 1]
+
+        am.extract_reference_timestamp = fake_extract
+        try:
+            from unittest.mock import patch
+
+            with patch_ocr_enabled(), patch.object(
+                am, "_snap_box_to_card", side_effect=lambda _gray, bbox: bbox
+            ):
                 return self.matcher._filter_matches_by_card_timestamp(
                     matches, self.screen
                 )
@@ -481,6 +645,28 @@ class TestCardTimestampGate(unittest.TestCase):
         self.matcher.reference_timestamps = {}
         result = self._run(["3:00 PM", "9:99 ZZ"])
         self.assertEqual(len(result), 2)
+
+    def test_different_source_time_still_limits_single_reference_timestamp(self):
+        result = self._run_with_source(
+            source_time="12:18 PM",
+            card_times=["12:05 PM", "12:05 PM", "12:05 PM", "12:20 PM"],
+            scores=[0.80, 0.95, 0.85, 0.90],
+            references=["12:20 PM", "12:18 PM", "12:05 PM", "12:04 PM", "12:04 PM"],
+        )
+
+        kept_x = {match["bbox"][0] for match in result}
+        self.assertEqual(kept_x, {100, 300})
+
+    def test_source_consumes_one_slot_from_its_timestamp(self):
+        result = self._run_with_source(
+            source_time="12:05 PM",
+            card_times=["12:05 PM", "12:05 PM"],
+            scores=[0.90, 0.95],
+            references=["12:05 PM", "12:05 PM"],
+        )
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["bbox"][0], 100)
 
 
 # ---------------------------------------------------------------------------
@@ -544,6 +730,28 @@ class TestClipboardToken(unittest.TestCase):
             first = auto_marker._clipboard_token(b"same pixels")
             second = auto_marker._clipboard_token(b"same pixels")
         self.assertEqual(first, second)
+
+
+class TestClipboardImageFormats(unittest.TestCase):
+    """Companion clipboard formats must not hide a valid ShareX image."""
+
+    def test_reads_image_without_metadata_blacklist(self):
+        from unittest.mock import patch
+        from PIL import Image
+
+        image = Image.new("RGB", (2, 2), "white")
+        with patch.object(auto_marker.ImageGrab, "grabclipboard", return_value=image):
+            self.assertIs(auto_marker.get_clipboard_image(), image)
+
+    def test_hashes_image_without_metadata_blacklist(self):
+        from unittest.mock import patch
+        from PIL import Image
+
+        image = Image.new("RGB", (2, 2), "white")
+        with patch.object(auto_marker.ImageGrab, "grabclipboard", return_value=image), patch.object(
+            auto_marker, "_get_clipboard_sequence_number", return_value=99
+        ):
+            self.assertIsNotNone(auto_marker.get_clipboard_image_hash())
 
 
 # ---------------------------------------------------------------------------
