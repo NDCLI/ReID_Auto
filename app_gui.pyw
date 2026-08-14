@@ -28,6 +28,7 @@ from config import (
     POLL_INTERVAL,
     ENABLE_OCR_TIMESTAMP_FILTER,
     VERBOSE_LOGGING,
+    RESOURCE_DIR,
 )
 from ocr_utils import warm_up_card_ocr
 from library_win import LibraryWindow
@@ -409,7 +410,7 @@ class AutoMarkerApp:
         self.root = root
         self.mutex = mutex
         self.root.title(APP_NAME)
-        self.assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+        self.assets_dir = os.path.join(RESOURCE_DIR, "assets")
         self.app_icon_png = os.path.join(self.assets_dir, "app_icon.png")
         self.app_icon_ico = os.path.join(self.assets_dir, "app_icon.ico")
         self._window_icon = None
@@ -1965,8 +1966,7 @@ class AutoMarkerApp:
         try:
             import cv2
             import os
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            template_path = os.path.join(base_dir, "ui_template.png")
+            template_path = os.path.join(RESOURCE_DIR, "ui_template.png")
             if not os.path.exists(template_path):
                 print(f"  [WARN] UI template not found at {template_path}. Skipping validation.")
                 return True

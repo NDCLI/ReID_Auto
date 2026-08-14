@@ -102,7 +102,12 @@ class AI_FeatureExtractor:
             from config import REID_MODELS
             model_specs = REID_MODELS
 
-        base_dir = base_dir or os.path.dirname(os.path.abspath(__file__))
+        if base_dir is None:
+            # In a PyInstaller portable build, model files are unpacked into
+            # the read-only runtime resource directory rather than beside the
+            # user-writable executable folder.
+            from config import RESOURCE_DIR
+            base_dir = RESOURCE_DIR
         self.models = {}
         self.weights = {}
         self.errors = {}

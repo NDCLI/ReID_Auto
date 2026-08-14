@@ -7,6 +7,7 @@ needed. It is installed alongside the original tool and keeps its own queries,
 output, model cache, shortcut, mutex and hotkeys.
 """
 import os
+import sys
 
 # ============================================================
 # VARIANT IDENTITY
@@ -20,9 +21,15 @@ MODEL_CACHE_DIRNAME = "ReIDAutoOSNet"
 # ============================================================
 # PATHS
 # ============================================================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-QUERIES_DIR = os.path.join(BASE_DIR, "queries")
-OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+# Resources are inside PyInstaller's runtime folder in a portable build, while
+# user-created Queries and results must sit beside the executable so they stay
+# writable and travel with the portable folder.
+SOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
+RESOURCE_DIR = getattr(sys, "_MEIPASS", SOURCE_DIR)
+APP_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else SOURCE_DIR
+BASE_DIR = APP_DIR  # Backwards-compatible name used by integrations.
+QUERIES_DIR = os.path.join(APP_DIR, "queries")
+OUTPUT_DIR = os.path.join(APP_DIR, "output")
 
 # ============================================================
 # MATCHING PARAMETERS

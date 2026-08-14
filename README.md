@@ -54,6 +54,15 @@ Công cụ tự động hóa nhận diện nhân vật Re-ID và tự động v�
 ### Khởi chạy:
 * Chạy file **`Run.bat`** để khởi động ứng dụng chạy ngầm ở khay hệ thống.
 
+### Bản Portable (không cần cài Python)
+* Mở `dist/AutoMarker-ReID-Portable/AutoMarker-ReID.exe` để chạy trực tiếp.
+* Luôn giữ nguyên cả thư mục `AutoMarker-ReID-Portable` khi sao chép sang máy
+  khác: EXE cần thư mục `_internal` đi kèm.
+* `queries/` và `output/` nằm cạnh EXE. Có thể chép Query hiện có vào đây để
+  mang theo dữ liệu nhận diện; kết quả mới sẽ được ghi vào `output/`.
+* Để tạo lại bản portable từ mã nguồn, chạy
+  `python -m PyInstaller --noconfirm --clean ReID_Auto_Draw_OSNet.spec`.
+
 ---
 
 ## 📁 Cấu trúc thư mục mã nguồn sạch

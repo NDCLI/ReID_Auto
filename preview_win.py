@@ -4,6 +4,7 @@ import customtkinter as ctk
 from PIL import Image, ImageTk
 import cv2
 import time
+from config import RESOURCE_DIR
 from auto_marker import (
     draw_match_boxes,
     save_result_with_metadata,
@@ -28,7 +29,7 @@ class PreviewWindow(ctk.CTkToplevel):
 
         # CTkToplevel may not inherit the root icon on Windows, so apply it
         # directly after the native window handle has been created.
-        assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+        assets_dir = os.path.join(RESOURCE_DIR, "assets")
         self._review_icon = None
 
         def apply_review_icon():

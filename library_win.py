@@ -19,6 +19,7 @@ from auto_marker import (
     update_metadata,
 )
 import cv2
+from config import RESOURCE_DIR
 
 VALID_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff")
 
@@ -122,7 +123,7 @@ class LibraryWindow(ctk.CTkToplevel):
         self.after(100, self._show_current)
 
     def _setup_icon(self):
-        assets = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+        assets = os.path.join(RESOURCE_DIR, "assets")
 
         def apply_icon():
             try:
