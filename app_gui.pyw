@@ -130,7 +130,9 @@ CLIPBOARD_IMAGE_READY_TIMEOUT_SECONDS = 5.0
 # ImageGrab samples the screen.  Without this, the frozen selector image can
 # retain a dim, stale copy of the main Re-ID window at the screen edge.
 DIRECT_CAPTURE_HIDE_DELAY_MS = 180
-DIRECT_CAPTURE_SAVE_DIR = r"C:\Users\HVV-AI33\Pictures\Screenshots"
+DIRECT_CAPTURE_SAVE_DIR = os.path.join(
+    os.path.expanduser("~"), "Pictures", "Screenshots"
+)
 
 # Windows 11-inspired surface and accent colours.  Keeping the palette in one
 # place avoids the mixed gray/emoji appearance that the earlier compact UI had.
