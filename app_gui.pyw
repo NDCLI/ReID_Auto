@@ -130,9 +130,42 @@ CLIPBOARD_IMAGE_READY_TIMEOUT_SECONDS = 5.0
 # ImageGrab samples the screen.  Without this, the frozen selector image can
 # retain a dim, stale copy of the main Re-ID window at the screen edge.
 DIRECT_CAPTURE_HIDE_DELAY_MS = 180
-DIRECT_CAPTURE_SAVE_DIR = os.path.join(
-    os.path.expanduser("~"), "Pictures", "Screenshots"
-)
+def _get_windows_pictures_dir():
+    """Return the real Pictures folder via Windows Shell API (OneDrive-aware)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", ctypes.c_ulong),
+                ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        # FOLDERID_Pictures {33E28130-4E1E-4676-835A-98395C3BC3BB}
+        guid = _GUID()
+        guid.Data1 = 0x33E28130
+        guid.Data2 = 0x4E1E
+        guid.Data3 = 0x4676
+        guid.Data4 = (ctypes.c_ubyte * 8)(
+            0x83, 0x5A, 0x98, 0x39, 0x5C, 0x3B, 0xC3, 0xBB
+        )
+        path_ptr = ctypes.c_wchar_p()
+        hr = ctypes.windll.shell32.SHGetKnownFolderPath(
+            ctypes.byref(guid), 0, None, ctypes.byref(path_ptr)
+        )
+        if hr == 0 and path_ptr.value:
+            result = path_ptr.value
+            ctypes.windll.ole32.CoTaskMemFree(path_ptr)
+            return result
+    except Exception:
+        pass
+    # Fallback
+    return os.path.join(os.path.expanduser("~"), "Pictures")
+
+DIRECT_CAPTURE_SAVE_DIR = os.path.join(_get_windows_pictures_dir(), "Screenshots")
 
 # Windows 11-inspired surface and accent colours.  Keeping the palette in one
 # place avoids the mixed gray/emoji appearance that the earlier compact UI had.
