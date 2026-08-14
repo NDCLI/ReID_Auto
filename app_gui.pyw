@@ -530,6 +530,16 @@ class GlobalHotkeyManager:
             user32.BringWindowToTop(target_hwnd)
             user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, None)
 
+        # Declare argtypes for CallNextHookEx — LPARAM is pointer-sized
+        # and will overflow the default c_int on 64-bit Python without this.
+        user32.CallNextHookEx.argtypes = [
+            wintypes.HHOOK,        # hhk  (can be None)
+            ctypes.c_int,          # nCode
+            wintypes.WPARAM,       # wParam
+            wintypes.LPARAM,       # lParam — 64-bit on x64!
+        ]
+        user32.CallNextHookEx.restype = ctypes.c_long
+
         MOUSEHOOKPROC = ctypes.CFUNCTYPE(
             ctypes.c_long,
             ctypes.c_int,
@@ -578,10 +588,7 @@ class GlobalHotkeyManager:
         self._mouse_hook = user32.SetWindowsHookExW(
             WH_MOUSE_LL, self._mouse_hook_cb, None, 0
         )
-        if self._mouse_hook:
-            print("  [HOOK] Chuột phải trong BlazeClient → Chụp vùng (tích hợp)")
-            print("  [HOOK] Chuột giữa trong Blaze/Excel  → Chuyển đổi qua lại")
-        else:
+        if not self._mouse_hook:
             print("  [WARN] Không thể cài đặt mouse hook")
 
         try:
