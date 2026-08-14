@@ -130,8 +130,15 @@ CLIPBOARD_IMAGE_READY_TIMEOUT_SECONDS = 5.0
 # ImageGrab samples the screen.  Without this, the frozen selector image can
 # retain a dim, stale copy of the main Re-ID window at the screen edge.
 DIRECT_CAPTURE_HIDE_DELAY_MS = 180
-def _get_windows_pictures_dir():
-    """Return the real Pictures folder via Windows Shell API (OneDrive-aware)."""
+def _get_capture_save_dirs():
+    """Return a list of unique screenshot directories to save into.
+
+    Always includes ~/Pictures/Screenshots (works on every Windows machine).
+    If OneDrive redirects Pictures to a different path, that directory is
+    added too — so the image lands in both places.
+    """
+    home_pics = os.path.join(os.path.expanduser("~"), "Pictures", "Screenshots")
+    dirs = [home_pics]
     try:
         import ctypes
         from ctypes import wintypes
@@ -157,15 +164,23 @@ def _get_windows_pictures_dir():
             ctypes.byref(guid), 0, None, ctypes.byref(path_ptr)
         )
         if hr == 0 and path_ptr.value:
-            result = path_ptr.value
+            shell_pics = os.path.join(path_ptr.value, "Screenshots")
             ctypes.windll.ole32.CoTaskMemFree(path_ptr)
-            return result
+            # Only add if it's genuinely a different directory.
+            try:
+                if not os.path.exists(home_pics) or not os.path.exists(shell_pics):
+                    if shell_pics.lower() != home_pics.lower():
+                        dirs.append(shell_pics)
+                elif not os.path.samefile(home_pics, shell_pics):
+                    dirs.append(shell_pics)
+            except (OSError, ValueError):
+                if shell_pics.lower() != home_pics.lower():
+                    dirs.append(shell_pics)
     except Exception:
         pass
-    # Fallback
-    return os.path.join(os.path.expanduser("~"), "Pictures")
+    return dirs
 
-DIRECT_CAPTURE_SAVE_DIR = os.path.join(_get_windows_pictures_dir(), "Screenshots")
+DIRECT_CAPTURE_SAVE_DIRS = _get_capture_save_dirs()
 
 # Windows 11-inspired surface and accent colours.  Keeping the palette in one
 # place avoids the mixed gray/emoji appearance that the earlier compact UI had.
@@ -1974,16 +1989,20 @@ class AutoMarkerApp:
             return False
 
     def _save_direct_capture_image(self, image):
-        """Persist the unmodified direct capture before recognition begins."""
-        try:
-            os.makedirs(DIRECT_CAPTURE_SAVE_DIR, exist_ok=True)
-            stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            path = os.path.join(DIRECT_CAPTURE_SAVE_DIR, f"ReID_{stamp}.png")
-            image.save(path, "PNG")
-            return path
-        except (OSError, ValueError) as exc:
-            print(f"  [CAPTURE] Không thể lưu ảnh gốc: {exc}")
-            return None
+        """Persist the unmodified direct capture to all configured directories."""
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        filename = f"ReID_{stamp}.png"
+        first_saved = None
+        for save_dir in DIRECT_CAPTURE_SAVE_DIRS:
+            try:
+                os.makedirs(save_dir, exist_ok=True)
+                path = os.path.join(save_dir, filename)
+                image.save(path, "PNG")
+                if first_saved is None:
+                    first_saved = path
+            except (OSError, ValueError) as exc:
+                print(f"  [CAPTURE] Không thể lưu vào {save_dir}: {exc}")
+        return first_saved
 
     def request_region_capture_from_tray(self, icon=None, item=None):
         self.root.after(0, self.start_region_capture)
