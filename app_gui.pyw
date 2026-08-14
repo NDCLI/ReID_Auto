@@ -34,14 +34,8 @@ from library_win import LibraryWindow
 from preview_win import PreviewWindow
 from query_organizer import QueryAutoCollector, MAX_QUERY_COUNT
 
-def get_clipboard_owner_process_name():
-    """Return the lowercase exe name that owns the current clipboard.
-
-    The active window is not a reliable source signal: ShareX often copies an
-    image while the user is still working in Excel. Clipboard ownership lets us
-    ignore an Excel copy macro without dropping a ShareX capture made from an
-    Excel-focused workflow.
-    """
+def _get_window_process_name(hwnd):
+    """Return the lowercase exe name for a Win32 window handle."""
     try:
         import ctypes
         from ctypes import wintypes
@@ -72,8 +66,6 @@ def get_clipboard_owner_process_name():
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CloseHandle.restype = wintypes.BOOL
 
-        user32.GetClipboardOwner.restype = wintypes.HWND
-        hwnd = user32.GetClipboardOwner()
         if not hwnd:
             return ""
         process_id = wintypes.DWORD()
@@ -95,12 +87,84 @@ def get_clipboard_owner_process_name():
         return ""
 
 
+def get_clipboard_owner_process_name():
+    """Return the lowercase exe name that owns the current clipboard."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        user32.GetClipboardOwner.restype = wintypes.HWND
+        return _get_window_process_name(user32.GetClipboardOwner())
+    except (OSError, AttributeError):
+        return ""
+
+
+def get_foreground_process_name():
+    """Return the lowercase exe name for the window receiving user input."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        return _get_window_process_name(user32.GetForegroundWindow())
+    except (OSError, AttributeError):
+        return ""
+
+
 # Clipboard owners whose image activity should not trigger auto-processing.
 # Excel copy macros (e.g. CopyAnh) push image shapes onto the clipboard, which
 # the monitor would otherwise mistake for new Re-ID screenshots and auto-open
-# Review. Do not use the foreground app here: ShareX can copy while Excel stays
-# focused.
+# Review.
 CLIPBOARD_IGNORE_OWNER_PROCESSES = {"excel.exe"}
+# ShareX may capture while Excel remains focused.  Its clipboard ownership is
+# definitive, so it must win over the foreground Excel safeguard below.
+CLIPBOARD_CAPTURE_OWNER_PROCESSES = {"sharex.exe"}
+# LastRegion publishes the clipboard payload later than RectangleRegion on
+# some ShareX installations.  Keep the changed clipboard sequence pending for
+# this whole window instead of throwing away the first capture after 1 second.
+CLIPBOARD_IMAGE_READY_TIMEOUT_SECONDS = 5.0
+# Give the desktop compositor a full frame after hiding the Tk window before
+# ImageGrab samples the screen.  Without this, the frozen selector image can
+# retain a dim, stale copy of the main Re-ID window at the screen edge.
+DIRECT_CAPTURE_HIDE_DELAY_MS = 180
+DIRECT_CAPTURE_SAVE_DIR = r"C:\Users\HVV-AI33\Pictures\Screenshots"
+
+
+def should_ignore_clipboard_image(owner_process=None, foreground_process=None):
+    """Keep Excel pastes out while allowing an actual ShareX capture.
+
+    A screenshot copied by ShareX can arrive while Excel is foreground, so a
+    foreground-only rule loses real captures.  Conversely, a normal image
+    paste into Excel should not start a Re-ID review.  Clipboard ownership
+    distinguishes the two paths whenever ShareX is the producer.
+    """
+    owner_process = (
+        get_clipboard_owner_process_name()
+        if owner_process is None
+        else owner_process
+    )
+    if owner_process in CLIPBOARD_CAPTURE_OWNER_PROCESSES:
+        return False
+    if owner_process in CLIPBOARD_IGNORE_OWNER_PROCESSES:
+        return True
+
+    foreground_process = (
+        get_foreground_process_name()
+        if foreground_process is None
+        else foreground_process
+    )
+    return foreground_process == "excel.exe"
+
+
+def normalize_capture_bounds(start_x, start_y, end_x, end_y, minimum_size=5):
+    """Return an ordered crop box, or ``None`` for a click/tiny selection."""
+    left, right = sorted((int(start_x), int(end_x)))
+    top, bottom = sorted((int(start_y), int(end_y)))
+    if right - left < minimum_size or bottom - top < minimum_size:
+        return None
+    return left, top, right, bottom
 
 
 class RedirectStdout:
@@ -145,6 +209,9 @@ class GlobalHotkeyManager:
         HOTKEY_PREV = 100
         HOTKEY_NEXT = 101
         HOTKEY_NEW_CAPTURE_QUERY = 103
+        HOTKEY_CAPTURE_REGION = 104
+        HOTKEY_CAPTURE_LAST_REGION = 105
+        HOTKEY_CAPTURE_REGION_FROM_BLAZE = 106
         HOTKEY_NUM_BASE = 200 # 200 to 209 for 0 to 9
         
         # Modifiers: Ctrl (0x0002) + Shift (0x0004) = 0x0006.
@@ -170,6 +237,20 @@ class GlobalHotkeyManager:
             MODS | 0x4000,
             0x4E,
             "Ctrl+Shift+N",
+        )
+
+        # The in-app capture path never writes to, or waits on, the clipboard.
+        # Alt+PrintScreen selects a new region; Alt+S reuses the prior region.
+        capture_modifiers = 0x0001 | 0x4000  # Alt + no repeat
+        register(HOTKEY_CAPTURE_REGION, capture_modifiers, 0x2C, "Alt+PrintScreen")
+        register(HOTKEY_CAPTURE_LAST_REGION, capture_modifiers, 0x53, "Alt+S")
+        # Reserved for AUTO.ahk's right-click handler in BLAZE.  It is not a
+        # ShareX shortcut, so the two capture systems remain independent.
+        register(
+            HOTKEY_CAPTURE_REGION_FROM_BLAZE,
+            0x0002 | 0x0001 | 0x0004 | 0x4000,
+            0x79,
+            "Ctrl+Alt+Shift+F10 (BLAZE chuột phải)",
         )
 
         # The original app installs a low-level hook that swallows plain Space
@@ -205,6 +286,9 @@ class GlobalHotkeyManager:
             user32.UnregisterHotKey(None, HOTKEY_PREV)
             user32.UnregisterHotKey(None, HOTKEY_NEXT)
             user32.UnregisterHotKey(None, HOTKEY_NEW_CAPTURE_QUERY)
+            user32.UnregisterHotKey(None, HOTKEY_CAPTURE_REGION)
+            user32.UnregisterHotKey(None, HOTKEY_CAPTURE_LAST_REGION)
+            user32.UnregisterHotKey(None, HOTKEY_CAPTURE_REGION_FROM_BLAZE)
             for i in range(10):
                 user32.UnregisterHotKey(None, HOTKEY_NUM_BASE + i)
 
@@ -212,6 +296,12 @@ class GlobalHotkeyManager:
         self.app.root.after(0, lambda: self._process_hotkey_on_main_thread(hotkey_id))
 
     def _process_hotkey_on_main_thread(self, hotkey_id):
+        if hotkey_id in (104, 106):
+            self.app.start_region_capture()
+            return
+        if hotkey_id == 105:
+            self.app.capture_last_region()
+            return
         if not os.path.exists(QUERIES_DIR):
             return
         folders = [d for d in os.listdir(QUERIES_DIR) if os.path.isdir(os.path.join(QUERIES_DIR, d))]
@@ -300,18 +390,31 @@ class AutoMarkerApp:
         self.pending_clipboard_sequence = None
         self.pending_clipboard_hash = None
         self.pending_clipboard_retries = 0
-        self.clipboard_image_retry_limit = 10
         self.clipboard_poll_ms = max(50, int(round(POLL_INTERVAL * 1000)))
+        self.clipboard_image_retry_limit = max(
+            10,
+            int(round(CLIPBOARD_IMAGE_READY_TIMEOUT_SECONDS * 1000 / self.clipboard_poll_ms)),
+        )
         self.is_processing = False
         self.active_preview_window = None
         self.left_click_timer = None
         self.last_tray_click_time = 0.0
+        self.last_capture_region = None
+        self.region_capture_overlay = None
+        self.region_capture_pending = False
+        self._restore_main_after_capture_cancel = False
+        self._region_capture_image = None
+        self._region_capture_start = None
+        self._region_capture_rect = None
         self.osd_window = None
         self.osd_timer = None
         self.query_collector = None
         self.auto_query_capture_enabled = True  # luôn bật, không có nút tắt
         self.auto_query_capture = tk.BooleanVar(value=True)
         self.capture_query_target = "Query_1"
+        # Direct screen captures are useful as an audit trail, but can be
+        # disabled per session without affecting matching or Query collection.
+        self.save_direct_captures = tk.BooleanVar(value=True)
         
         self.current_queries_dir = QUERIES_DIR
         
@@ -464,6 +567,47 @@ class AutoMarkerApp:
             font=("Segoe UI", 9, "bold"),
         )
         self.btn_next_capture_query.pack(side=tk.LEFT)
+
+        capture_bar = ctk.CTkFrame(self.root, fg_color="transparent")
+        capture_bar.pack(fill=tk.X, padx=16, pady=(0, 8))
+
+        ctk.CTkButton(
+            capture_bar,
+            text="✂ Chụp vùng",
+            width=138,
+            height=30,
+            corner_radius=7,
+            command=self.start_region_capture,
+            fg_color="#2563EB",
+            hover_color="#1D4ED8",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        ctk.CTkButton(
+            capture_bar,
+            text="↻ Chụp lại vùng trước",
+            width=172,
+            height=30,
+            corner_radius=7,
+            command=self.capture_last_region,
+            fg_color="#334155",
+            hover_color="#475569",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        ctk.CTkCheckBox(
+            capture_bar,
+            text="Lưu ảnh chụp",
+            variable=self.save_direct_captures,
+            onvalue=True,
+            offvalue=False,
+            checkbox_width=18,
+            checkbox_height=18,
+            font=("Segoe UI", 10),
+            text_color="#CBD5E1",
+            fg_color="#2563EB",
+            hover_color="#1D4ED8",
+        ).pack(side=tk.LEFT)
 
         # Body: sidebar (left) + content (right)
         body = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -1159,6 +1303,295 @@ class AutoMarkerApp:
         self.active_preview_window = None
         self._sync_clipboard_snapshot()
 
+    def _capture_is_available(self):
+        """Reject a new direct capture while the app cannot process it safely."""
+        if (
+            getattr(self, "region_capture_pending", False)
+            or getattr(self, "region_capture_overlay", None) is not None
+        ):
+            self.show_osd("⚠️ Đang chọn vùng chụp")
+            return False
+        if getattr(self, "is_processing", False):
+            self.show_osd("⏳ Ảnh trước đang được xử lý")
+            return False
+        preview = getattr(self, "active_preview_window", None)
+        if preview is not None:
+            try:
+                if preview.winfo_exists():
+                    self.show_osd("⚠️ Hãy đóng cửa sổ Duyệt ảnh trước")
+                    return False
+            except (tk.TclError, AttributeError):
+                pass
+            self.active_preview_window = None
+        if not getattr(self, "matcher", None):
+            self.show_osd("⏳ Re-ID đang khởi tạo")
+            return False
+        return True
+
+    def _grab_virtual_screen(self):
+        """Take one frozen desktop image for selection or last-region capture."""
+        from PIL import ImageGrab
+
+        try:
+            return ImageGrab.grab(all_screens=True)
+        except TypeError:
+            # Older Pillow builds do not support ``all_screens``.
+            return ImageGrab.grab()
+
+    def _virtual_screen_origin(self):
+        """Return the virtual desktop origin used by ImageGrab on Windows."""
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            return user32.GetSystemMetrics(76), user32.GetSystemMetrics(77)
+        except (OSError, AttributeError):
+            return 0, 0
+
+    def _hide_main_window_for_capture(self):
+        """Hide the main window before sampling pixels from the desktop."""
+        try:
+            self._restore_main_after_capture_cancel = self.root.state() != "withdrawn"
+        except (tk.TclError, AttributeError):
+            self._restore_main_after_capture_cancel = False
+            return
+        if self._restore_main_after_capture_cancel:
+            self.root.withdraw()
+            # ``withdraw`` changes Tk state immediately, but the last frame can
+            # still be present in DWM when ImageGrab runs.  Flush it before the
+            # scheduled capture, then allow one additional desktop frame.
+            self.root.update()
+            try:
+                import ctypes
+
+                ctypes.windll.dwmapi.DwmFlush()
+            except (OSError, AttributeError):
+                pass
+
+    def _restore_main_window_after_capture_cancel(self):
+        if not getattr(self, "_restore_main_after_capture_cancel", False):
+            return
+        self._restore_main_after_capture_cancel = False
+        try:
+            self.root.deiconify()
+            self.root.after(10, self.root.focus_force)
+        except (tk.TclError, AttributeError):
+            pass
+
+    def start_region_capture(self):
+        """Show a lightweight, ShareX-independent region selector."""
+        if not self._capture_is_available():
+            return
+        # A button press originates from the visible main window.  Give Windows
+        # one event-loop turn to withdraw it so it cannot appear in the frozen
+        # desktop image used by the selector.
+        self._hide_main_window_for_capture()
+        self.region_capture_pending = True
+        self.root.after(DIRECT_CAPTURE_HIDE_DELAY_MS, self._open_region_capture_selector)
+
+    def _open_region_capture_selector(self):
+        self.region_capture_pending = False
+        try:
+            screenshot = self._grab_virtual_screen()
+        except (OSError, ValueError) as exc:
+            print(f"  [CAPTURE] Không thể chụp màn hình: {exc}")
+            self._restore_main_window_after_capture_cancel()
+            self.show_osd("⚠️ Không thể chụp màn hình")
+            return
+
+        origin_x, origin_y = self._virtual_screen_origin()
+        overlay = tk.Toplevel(self.root)
+        self.region_capture_overlay = overlay
+        self._region_capture_image = screenshot
+        self._region_capture_start = None
+        self._region_capture_rect = None
+
+        overlay.overrideredirect(True)
+        overlay.attributes("-topmost", True)
+        overlay.geometry(
+            f"{screenshot.width}x{screenshot.height}{origin_x:+d}{origin_y:+d}"
+        )
+        overlay.configure(bg="#101318")
+
+        from PIL import ImageTk
+
+        canvas = tk.Canvas(
+            overlay,
+            width=screenshot.width,
+            height=screenshot.height,
+            highlightthickness=0,
+            cursor="crosshair",
+        )
+        canvas.pack(fill=tk.BOTH, expand=True)
+        # Keep the PhotoImage on the app so Tk does not garbage-collect it.
+        self._region_capture_photo = ImageTk.PhotoImage(screenshot)
+        canvas.create_image(0, 0, anchor=tk.NW, image=self._region_capture_photo)
+        canvas.create_text(
+            16,
+            16,
+            anchor=tk.NW,
+            text="Kéo chuột để chọn vùng  •  Esc để hủy",
+            fill="#FFFFFF",
+            font=("Segoe UI", 11, "bold"),
+            activefill="#FFFFFF",
+        )
+        canvas.bind("<ButtonPress-1>", self._on_region_capture_press)
+        canvas.bind("<B1-Motion>", self._on_region_capture_drag)
+        canvas.bind("<ButtonRelease-1>", self._on_region_capture_release)
+        overlay.bind("<Escape>", self.cancel_region_capture)
+        overlay.protocol("WM_DELETE_WINDOW", self.cancel_region_capture)
+        overlay.focus_force()
+        try:
+            overlay.grab_set()
+        except tk.TclError:
+            pass
+
+    def _on_region_capture_press(self, event):
+        self._region_capture_start = (event.x, event.y)
+        canvas = event.widget
+        if self._region_capture_rect is not None:
+            canvas.delete(self._region_capture_rect)
+        self._region_capture_rect = canvas.create_rectangle(
+            event.x,
+            event.y,
+            event.x,
+            event.y,
+            outline="#38BDF8",
+            width=2,
+            dash=(5, 3),
+        )
+
+    def _on_region_capture_drag(self, event):
+        if self._region_capture_start is None or self._region_capture_rect is None:
+            return
+        start_x, start_y = self._region_capture_start
+        event.widget.coords(
+            self._region_capture_rect, start_x, start_y, event.x, event.y
+        )
+
+    def _on_region_capture_release(self, event):
+        if self._region_capture_start is None:
+            self.cancel_region_capture()
+            return
+        start_x, start_y = self._region_capture_start
+        bounds = normalize_capture_bounds(start_x, start_y, event.x, event.y)
+        screenshot = self._region_capture_image
+        self._destroy_region_capture_overlay()
+        if bounds is None or screenshot is None:
+            self._restore_main_window_after_capture_cancel()
+            self.show_osd("⚠️ Vùng chụp quá nhỏ")
+            return
+        self.last_capture_region = bounds
+        # A successful capture returns the app to its normal tray workflow.
+        self._restore_main_after_capture_cancel = False
+        self._submit_direct_capture(screenshot.crop(bounds).copy(), "vùng đã chọn")
+
+    def _destroy_region_capture_overlay(self):
+        overlay = getattr(self, "region_capture_overlay", None)
+        self.region_capture_overlay = None
+        self.region_capture_pending = False
+        self._region_capture_start = None
+        self._region_capture_rect = None
+        self._region_capture_image = None
+        self._region_capture_photo = None
+        if overlay is not None:
+            try:
+                overlay.grab_release()
+            except tk.TclError:
+                pass
+            try:
+                overlay.destroy()
+            except tk.TclError:
+                pass
+
+    def cancel_region_capture(self, event=None):
+        self._destroy_region_capture_overlay()
+        self._restore_main_window_after_capture_cancel()
+        self.show_osd("Đã hủy chụp vùng")
+
+    def capture_last_region(self):
+        """Capture the most recently selected region without the selector."""
+        if not self._capture_is_available():
+            return
+        bounds = getattr(self, "last_capture_region", None)
+        if bounds is None:
+            self.show_osd("⚠️ Chưa có vùng trước đó")
+            return
+        self._hide_main_window_for_capture()
+        self.root.after(
+            DIRECT_CAPTURE_HIDE_DELAY_MS,
+            self._capture_last_region_after_hiding_main,
+        )
+
+    def _capture_last_region_after_hiding_main(self):
+        bounds = getattr(self, "last_capture_region", None)
+        if bounds is None:
+            self._restore_main_window_after_capture_cancel()
+            return
+        try:
+            screenshot = self._grab_virtual_screen()
+        except (OSError, ValueError) as exc:
+            print(f"  [CAPTURE] Không thể chụp lại vùng trước: {exc}")
+            self._restore_main_window_after_capture_cancel()
+            self.show_osd("⚠️ Không thể chụp màn hình")
+            return
+
+        left, top, right, bottom = bounds
+        if left < 0 or top < 0 or right > screenshot.width or bottom > screenshot.height:
+            self._restore_main_window_after_capture_cancel()
+            self.show_osd("⚠️ Vùng trước không còn hợp lệ")
+            return
+        self._restore_main_after_capture_cancel = False
+        self._submit_direct_capture(screenshot.crop(bounds).copy(), "vùng trước")
+
+    def _submit_direct_capture(self, pil_img, capture_label):
+        """Run an in-app capture through the normal Re-ID/Review pipeline."""
+        if pil_img is None:
+            return
+        try:
+            image = pil_img.convert("RGB").copy()
+        except (AttributeError, ValueError) as exc:
+            print(f"  [CAPTURE] Ảnh chụp không hợp lệ: {exc}")
+            self.show_osd("⚠️ Ảnh chụp không hợp lệ")
+            return
+        if self._should_save_direct_capture():
+            saved_path = self._save_direct_capture_image(image)
+            if saved_path:
+                print(f"  [CAPTURE] Đã lưu ảnh gốc: {saved_path}")
+        detected_at = time.perf_counter()
+        self.is_processing = True
+        print(f"  [CAPTURE] Đã chụp {capture_label}; đang nhận diện...")
+        threading.Thread(
+            target=self.process_clipboard_image,
+            args=(image, detected_at),
+            daemon=True,
+        ).start()
+
+    def _should_save_direct_capture(self):
+        save_toggle = getattr(self, "save_direct_captures", None)
+        try:
+            return bool(save_toggle.get())
+        except (AttributeError, tk.TclError):
+            return False
+
+    def _save_direct_capture_image(self, image):
+        """Persist the unmodified direct capture before recognition begins."""
+        try:
+            os.makedirs(DIRECT_CAPTURE_SAVE_DIR, exist_ok=True)
+            stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            path = os.path.join(DIRECT_CAPTURE_SAVE_DIR, f"ReID_{stamp}.png")
+            image.save(path, "PNG")
+            return path
+        except (OSError, ValueError) as exc:
+            print(f"  [CAPTURE] Không thể lưu ảnh gốc: {exc}")
+            return None
+
+    def request_region_capture_from_tray(self, icon=None, item=None):
+        self.root.after(0, self.start_region_capture)
+
+    def request_last_region_capture_from_tray(self, icon=None, item=None):
+        self.root.after(0, self.capture_last_region)
+
     def poll_clipboard(self):
         if not getattr(self, 'is_monitoring', False):
             return
@@ -1228,14 +1661,12 @@ class AutoMarkerApp:
                             self.last_clipboard_hash = current_hash
                             self.pending_clipboard_hash = None
                         self.pending_clipboard_retries = 0
-                        if (
-                            get_clipboard_owner_process_name()
-                            in CLIPBOARD_IGNORE_OWNER_PROCESSES
-                        ):
-                            # An Excel copy macro (or similar) owns the image.
+                        if should_ignore_clipboard_image():
+                            # An Excel copy/paste flow owns the image, or Excel
+                            # is receiving a non-ShareX image paste.
                             # The sequence is recorded above, so it will not
-                            # retrigger after another window gains focus.
-                            print("  [INFO] Ignoring clipboard image owned by Excel (copy macro).")
+                            # retrigger after the user leaves Excel.
+                            print("  [INFO] Ignoring clipboard image during Excel copy/paste.")
                         else:
                             detected_at = time.perf_counter()
                             print("  [DETECT] New image found in clipboard.")
@@ -1543,6 +1974,8 @@ class AutoMarkerApp:
         return pystray.Menu(
             pystray.MenuItem('DefaultAction', self.on_tray_left_click, default=True, visible=False),
             pystray.MenuItem('Hiện ứng dụng', self.show_window),
+            pystray.MenuItem('Chụp vùng  (Alt+PrintScreen)', self.request_region_capture_from_tray),
+            pystray.MenuItem('Chụp lại vùng trước  (Alt+S)', self.request_last_region_capture_from_tray),
             pystray.MenuItem('Chọn nhanh Folder', pystray.Menu(lambda: self.get_folder_menu_items())),
             pystray.MenuItem('Khởi động lại', self.restart_app),
             pystray.MenuItem('Thoát ứng dụng', self.quit_app)

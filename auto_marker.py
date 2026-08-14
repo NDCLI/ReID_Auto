@@ -1569,35 +1569,6 @@ def draw_match_boxes(image_bgr: np.ndarray, matches: list[dict]) -> np.ndarray:
 # ============================================================
 # CLIPBOARD UTILITIES
 # ============================================================
-def is_actual_screenshot() -> bool:
-    """Verify if the clipboard data looks like a pure screenshot (no HTML/URL metadata formats)."""
-    try:
-        blocked_keywords = ("html", "url", "chrome", "link", "mime")
-        win32clipboard.OpenClipboard()
-        try:
-            fmt = 0
-            while True:
-                fmt = win32clipboard.EnumClipboardFormats(fmt)
-                if fmt == 0:
-                    break
-                try:
-                    name = win32clipboard.GetClipboardFormatName(fmt)
-                    name_lower = name.lower()
-                    if any(kw in name_lower for kw in blocked_keywords):
-                        return False
-                except Exception:
-                    # GetClipboardFormatName raises pywintypes.error for
-                    # standard/system format IDs — safe to skip them.
-                    pass
-        finally:
-            win32clipboard.CloseClipboard()
-    except Exception:
-        # OpenClipboard / EnumClipboardFormats can also raise
-        # pywintypes.error when the clipboard is locked by another app.
-        pass
-    return True
-
-
 def get_clipboard_image_win32() -> Image.Image | list[str] | None:
     try:
         win32clipboard.OpenClipboard()
@@ -1652,10 +1623,13 @@ def get_clipboard_image_win32() -> Image.Image | list[str] | None:
 
 
 def get_clipboard_image() -> Image.Image | None:
-    """Get current image from clipboard, returns PIL Image or None."""
-    if not is_actual_screenshot():
-        return None
-        
+    """Return a readable clipboard image, regardless of companion formats.
+
+    ShareX can publish an image together with HTML, URL, or MIME clipboard
+    formats.  Those labels describe additional representations of the same
+    capture, not an invalid image.  Image extraction itself is therefore the
+    only reliable acceptance check here.
+    """
     try:
         img = ImageGrab.grabclipboard()
         if img is not None:
@@ -1715,9 +1689,8 @@ def get_clipboard_image_hash() -> str | None:
     The Windows sequence number matters because ShareX can recapture the same
     region, producing identical pixels but a new clipboard event.
     """
-    if not is_actual_screenshot():
-        return None
-        
+    # Do not blacklist the image because ShareX also supplies HTML/URL/MIME
+    # representations.  The image read below is the authoritative check.
     try:
         img = ImageGrab.grabclipboard()
         if img is not None:

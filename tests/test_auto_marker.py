@@ -732,6 +732,28 @@ class TestClipboardToken(unittest.TestCase):
         self.assertEqual(first, second)
 
 
+class TestClipboardImageFormats(unittest.TestCase):
+    """Companion clipboard formats must not hide a valid ShareX image."""
+
+    def test_reads_image_without_metadata_blacklist(self):
+        from unittest.mock import patch
+        from PIL import Image
+
+        image = Image.new("RGB", (2, 2), "white")
+        with patch.object(auto_marker.ImageGrab, "grabclipboard", return_value=image):
+            self.assertIs(auto_marker.get_clipboard_image(), image)
+
+    def test_hashes_image_without_metadata_blacklist(self):
+        from unittest.mock import patch
+        from PIL import Image
+
+        image = Image.new("RGB", (2, 2), "white")
+        with patch.object(auto_marker.ImageGrab, "grabclipboard", return_value=image), patch.object(
+            auto_marker, "_get_clipboard_sequence_number", return_value=99
+        ):
+            self.assertIsNotNone(auto_marker.get_clipboard_image_hash())
+
+
 # ---------------------------------------------------------------------------
 # find_matches fast-root fallback — "select all folders" mode
 # ---------------------------------------------------------------------------
