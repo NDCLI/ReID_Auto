@@ -241,12 +241,13 @@ class GlobalHotkeyManager:
         self.app = app
         self.thread = None
         self.running = False
-        
+        self._mouse_hook = None
+
     def start(self):
         self.running = True
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
-        
+
     def stop(self):
         if not self.running:
             return
@@ -261,6 +262,7 @@ class GlobalHotkeyManager:
         import ctypes
         from ctypes import wintypes
         user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
         
         # Hotkey IDs
         HOTKEY_PREV = 100
@@ -301,8 +303,9 @@ class GlobalHotkeyManager:
         capture_modifiers = 0x0001 | 0x4000  # Alt + no repeat
         register(HOTKEY_CAPTURE_REGION, capture_modifiers, 0x2C, "Alt+PrintScreen")
         register(HOTKEY_CAPTURE_LAST_REGION, capture_modifiers, 0x53, "Alt+S")
-        # Reserved for AUTO.ahk's right-click handler in BLAZE.  It is not a
-        # ShareX shortcut, so the two capture systems remain independent.
+        # Fallback hotkey for BLAZE integration — the primary trigger is now the
+        # low-level mouse hook (right-click in BlazeClient → Region Capture).
+        # This hotkey remains registered so AUTO.ahk still works if running.
         register(
             HOTKEY_CAPTURE_REGION_FROM_BLAZE,
             0x0002 | 0x0001 | 0x0004 | 0x4000,
@@ -327,6 +330,210 @@ class GlobalHotkeyManager:
                 + ", ".join(failed_hotkeys)
             )
 
+        # ── Low-level mouse hook ──────────────────────────────────────────────
+        # Two features driven by a single WH_MOUSE_LL hook:
+        #   • Right-click  in BlazeClient → Region Capture
+        #   • Middle-click in BlazeClient / Excel → toggle between the two apps
+        #
+        # WH_MOUSE_LL callbacks MUST return in < ~200 ms or Windows kills the
+        # hook and the entire mouse input chain freezes.  All heavy Win32 work
+        # (OpenProcess / QueryFullProcessImageNameW) runs in a 250 ms SetTimer
+        # callback that caches:
+        #   self._fg_is_blaze   – bool, foreground is BlazeClient?
+        #   self._fg_is_excel   – bool, foreground is Excel?
+        #   self._blaze_hwnd    – last-seen BlazeClient HWND (for switching)
+        #   self._excel_hwnd    – last-seen Excel HWND (for switching)
+        # The hook callback only reads these cached values — zero Win32 calls,
+        # returns in microseconds.
+        BLAZE_EXE = "blazeclient.exe"
+        EXCEL_EXE = "excel.exe"
+        WH_MOUSE_LL = 14
+        WM_RBUTTONDOWN = 0x0204
+        WM_RBUTTONUP = 0x0205
+        WM_MBUTTONDOWN = 0x0207
+        WM_MBUTTONUP = 0x0208
+        self._rclick_swallowed = False
+        self._mclick_swallowed = False
+        self._fg_is_blaze = False
+        self._fg_is_excel = False
+        self._blaze_hwnd = None
+        self._excel_hwnd = None
+
+        # --- Foreground-window polling (runs on the SAME thread) ---------------
+        TIMER_ID_FG_POLL = 9901
+        TIMER_INTERVAL_MS = 250
+
+        # Declare argtypes once for EnumWindows
+        WNDENUMPROC = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
+        )
+        user32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+        user32.EnumWindows.restype = wintypes.BOOL
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+
+        def _hwnd_to_exe(hwnd):
+            """Return lowercase exe name for a window handle, or ''."""
+            try:
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                h = kernel32.OpenProcess(0x1000, False, pid.value)
+                if not h:
+                    return ""
+                try:
+                    buf = ctypes.create_unicode_buffer(512)
+                    sz = wintypes.DWORD(len(buf))
+                    if kernel32.QueryFullProcessImageNameW(
+                        h, 0, buf, ctypes.byref(sz)
+                    ):
+                        return os.path.basename(buf.value).lower()
+                    return ""
+                finally:
+                    kernel32.CloseHandle(h)
+            except Exception:
+                return ""
+
+        def _poll_foreground(_hwnd_ignored, _msg, _id, _time):
+            """TimerProc callback — update cached flags every 250 ms."""
+            try:
+                fg_hwnd = user32.GetForegroundWindow()
+                if not fg_hwnd:
+                    self._fg_is_blaze = False
+                    self._fg_is_excel = False
+                    return
+                exe = _hwnd_to_exe(fg_hwnd)
+                self._fg_is_blaze = (exe == BLAZE_EXE)
+                self._fg_is_excel = (exe == EXCEL_EXE)
+                # Remember the most recent visible HWND for each app so the
+                # middle-click toggle can SetForegroundWindow to it.
+                if self._fg_is_blaze:
+                    self._blaze_hwnd = fg_hwnd
+                elif self._fg_is_excel:
+                    self._excel_hwnd = fg_hwnd
+
+                # If we haven't seen one of the two apps yet, scan all
+                # top-level windows once to seed the cache.
+                if self._blaze_hwnd is None or self._excel_hwnd is None:
+                    def _enum_cb(hwnd, _lparam):
+                        if not user32.IsWindowVisible(hwnd):
+                            return True
+                        name = _hwnd_to_exe(hwnd)
+                        if name == BLAZE_EXE and self._blaze_hwnd is None:
+                            self._blaze_hwnd = hwnd
+                        elif name == EXCEL_EXE and self._excel_hwnd is None:
+                            self._excel_hwnd = hwnd
+                        # Stop early if both found.
+                        if self._blaze_hwnd and self._excel_hwnd:
+                            return False
+                        return True
+                    user32.EnumWindows(WNDENUMPROC(_enum_cb), 0)
+            except Exception:
+                self._fg_is_blaze = False
+                self._fg_is_excel = False
+
+        TIMERPROC = ctypes.CFUNCTYPE(
+            None, wintypes.HWND, ctypes.c_uint, ctypes.POINTER(ctypes.c_uint), wintypes.DWORD
+        )
+        self._fg_timer_cb = TIMERPROC(_poll_foreground)
+        user32.SetTimer(None, TIMER_ID_FG_POLL, TIMER_INTERVAL_MS, self._fg_timer_cb)
+
+        # --- Mouse hook (ultra-light: reads cached bools/HWNDs) ---------------
+
+        # Windows blocks SetForegroundWindow unless the calling thread owns the
+        # foreground lock.  The reliable bypass: simulate an Alt press via
+        # keybd_event (this tricks Windows into thinking the user initiated the
+        # switch), then call SetForegroundWindow, then release Alt.  Combined
+        # with ShowWindow(SW_RESTORE) for minimised windows and
+        # BringWindowToTop, this works even across processes.
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD)
+        ]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.restype = wintypes.BOOL
+        user32.IsWindow.argtypes = [wintypes.HWND]
+        user32.IsWindow.restype = wintypes.BOOL
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype = wintypes.BOOL
+        user32.IsIconic.argtypes = [wintypes.HWND]
+        user32.IsIconic.restype = wintypes.BOOL
+        user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        user32.BringWindowToTop.restype = wintypes.BOOL
+        user32.keybd_event.argtypes = [
+            ctypes.c_byte, ctypes.c_byte, wintypes.DWORD, ctypes.POINTER(ctypes.c_ulong)
+        ]
+        user32.keybd_event.restype = None
+        SW_RESTORE = 9
+        VK_MENU = 0x12          # Alt key
+        KEYEVENTF_KEYUP = 0x0002
+
+        def _switch_to(target_hwnd):
+            """Force *target_hwnd* to the foreground — works across processes."""
+            if not target_hwnd or not user32.IsWindow(target_hwnd):
+                return
+            # Restore if minimised, otherwise the switch often does nothing.
+            if user32.IsIconic(target_hwnd):
+                user32.ShowWindow(target_hwnd, SW_RESTORE)
+            # Simulate Alt press → unlocks SetForegroundWindow restriction.
+            user32.keybd_event(VK_MENU, 0, 0, None)
+            user32.SetForegroundWindow(target_hwnd)
+            user32.BringWindowToTop(target_hwnd)
+            user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, None)
+
+        MOUSEHOOKPROC = ctypes.CFUNCTYPE(
+            ctypes.c_long,
+            ctypes.c_int,
+            ctypes.wintypes.WPARAM,
+            ctypes.wintypes.LPARAM,
+        )
+
+        def _mouse_hook_proc(nCode, wParam, lParam):
+            if nCode < 0:
+                return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+            # ── Right-click in Blaze → Region Capture ──
+            if wParam in (WM_RBUTTONDOWN, WM_RBUTTONUP):
+                if self._fg_is_blaze:
+                    if wParam == WM_RBUTTONDOWN:
+                        self._rclick_swallowed = True
+                        self.app.root.after(0, self.app.start_region_capture)
+                    elif wParam == WM_RBUTTONUP and self._rclick_swallowed:
+                        self._rclick_swallowed = False
+                    return 1  # swallow
+
+            # ── Middle-click in Blaze/Excel → toggle between them ──
+            if wParam in (WM_MBUTTONDOWN, WM_MBUTTONUP):
+                if self._fg_is_blaze or self._fg_is_excel:
+                    if wParam == WM_MBUTTONDOWN:
+                        self._mclick_swallowed = True
+                        target = (
+                            self._excel_hwnd if self._fg_is_blaze
+                            else self._blaze_hwnd
+                        )
+                        _switch_to(target)
+                    elif wParam == WM_MBUTTONUP and self._mclick_swallowed:
+                        self._mclick_swallowed = False
+                    return 1  # swallow
+
+            return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+        self._mouse_hook_cb = MOUSEHOOKPROC(_mouse_hook_proc)
+        user32.SetWindowsHookExW.argtypes = [
+            ctypes.c_int,
+            MOUSEHOOKPROC,
+            wintypes.HINSTANCE,
+            wintypes.DWORD,
+        ]
+        user32.SetWindowsHookExW.restype = wintypes.HHOOK
+        self._mouse_hook = user32.SetWindowsHookExW(
+            WH_MOUSE_LL, self._mouse_hook_cb, None, 0
+        )
+        if self._mouse_hook:
+            print("  [HOOK] Chuột phải trong BlazeClient → Chụp vùng (tích hợp)")
+            print("  [HOOK] Chuột giữa trong Blaze/Excel  → Chuyển đổi qua lại")
+        else:
+            print("  [WARN] Không thể cài đặt mouse hook")
+
         try:
             msg = wintypes.MSG()
             while self.running:
@@ -337,6 +544,10 @@ class GlobalHotkeyManager:
                     user32.TranslateMessage(ctypes.byref(msg))
                     user32.DispatchMessageW(ctypes.byref(msg))
         finally:
+            user32.KillTimer(None, TIMER_ID_FG_POLL)
+            if self._mouse_hook:
+                user32.UnhookWindowsHookEx(self._mouse_hook)
+                self._mouse_hook = None
             if keyboard_hook:
                 user32.UnhookWindowsHookEx(keyboard_hook)
             # Unregister all hotkeys
