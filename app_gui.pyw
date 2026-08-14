@@ -131,6 +131,62 @@ CLIPBOARD_IMAGE_READY_TIMEOUT_SECONDS = 5.0
 DIRECT_CAPTURE_HIDE_DELAY_MS = 180
 DIRECT_CAPTURE_SAVE_DIR = r"C:\Users\HVV-AI33\Pictures\Screenshots"
 
+# Windows 11-inspired surface and accent colours.  Keeping the palette in one
+# place avoids the mixed gray/emoji appearance that the earlier compact UI had.
+UI_COLORS = {
+    "window": "#101218",
+    "surface": "#191D25",
+    "surface_hover": "#222834",
+    "border": "#2C3442",
+    "text": "#F3F6FC",
+    "muted": "#9AA6B7",
+    "subtle": "#68768A",
+    "primary": "#3B82F6",
+    "primary_hover": "#2563EB",
+    "secondary": "#2A3342",
+    "secondary_hover": "#374357",
+    "danger": "#E05263",
+    "danger_hover": "#B93A4A",
+}
+
+# Segoe MDL2 Assets is bundled with Windows 10/11.  Render the glyphs into
+# CTkImage objects so button labels can stay in the normal, highly legible
+# Segoe UI font while icons retain the native Windows visual language.
+FLUENT_ICON_FONT_PATH = r"C:\Windows\Fonts\segmdl2.ttf"
+FLUENT_ICONS = {
+    "camera": "\uE722",
+    "refresh": "\uE72C",
+    "folder": "\uE8B7",
+    "clear": "\uE894",
+    "delete": "\uE74D",
+    "save": "\uE74E",
+    "target": "\uE71B",
+    "repeat": "\uE8EE",
+    "add": "\uE710",
+    "activity": "\uE9D9",
+}
+
+
+def create_fluent_icon(icon_name, color, size=18):
+    """Return a small Fluent icon for a CTk widget, or ``None`` gracefully."""
+    glyph = FLUENT_ICONS.get(icon_name)
+    if not glyph or not os.path.isfile(FLUENT_ICON_FONT_PATH):
+        return None
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+
+        pixel_size = max(16, int(size * 2))
+        image = Image.new("RGBA", (pixel_size, pixel_size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.truetype(FLUENT_ICON_FONT_PATH, pixel_size - 2)
+        bbox = draw.textbbox((0, 0), glyph, font=font)
+        x = (pixel_size - (bbox[2] - bbox[0])) // 2 - bbox[0]
+        y = (pixel_size - (bbox[3] - bbox[1])) // 2 - bbox[1]
+        draw.text((x, y), glyph, font=font, fill=color)
+        return ctk.CTkImage(light_image=image, dark_image=image, size=(size, size))
+    except (OSError, ValueError, ImportError):
+        return None
+
 
 def should_ignore_clipboard_image(owner_process=None, foreground_process=None):
     """Keep Excel pastes out while allowing an actual ShareX capture.
@@ -369,15 +425,16 @@ class AutoMarkerApp:
         # Keep enough vertical room for the log header and the capture
         # destination card at the bottom.  A shorter window clips the
         # "Chọn Query trống" button when the app is restored from the tray.
-        w = 760
-        h = 640
+        w = 900
+        h = 700
         ws = self.root.winfo_screenwidth()
         hs = self.root.winfo_screenheight()
         x = (ws - w) // 2
         y = (hs - h) // 2
         self.root.geometry(f"{w}x{h}+{x}+{y}")
         self.root.resizable(True, True)
-        self.root.minsize(680, 620)
+        self.root.minsize(760, 640)
+        self._ui_icon_images = []
         
         # Monitoring and Log state
         self.is_monitoring = False
@@ -424,8 +481,8 @@ class AutoMarkerApp:
         # too short on another display and let the bottom controls get clipped.
         self.root.update_idletasks()
         self.root.minsize(
-            max(680, self.root.winfo_reqwidth()),
-            max(620, self.root.winfo_reqheight() + 8),
+            max(760, self.root.winfo_reqwidth()),
+            max(640, self.root.winfo_reqheight() + 8),
         )
         self.process_logs()
         
@@ -443,157 +500,243 @@ class AutoMarkerApp:
         # Khởi động ẩn dưới khay hệ thống (Tray Icon)
         self.root.withdraw()
 
+    def _ui_icon(self, icon_name, color, size=18):
+        """Create and retain a Fluent icon while this window is alive."""
+        icon = create_fluent_icon(icon_name, color, size)
+        if icon is not None:
+            self._ui_icon_images.append(icon)
+        return icon
+
     def setup_ui(self):
-        # Configure appearance
+        """Build a compact, Windows 11-style control surface."""
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
-        self.root.configure(fg_color="#15181C")
+        self.root.configure(fg_color=UI_COLORS["window"])
 
-        # Header bar (product identity + live state)
-        header = ctk.CTkFrame(self.root, fg_color="transparent")
-        header.pack(fill=tk.X, padx=16, pady=(16, 8))
+        # Header: product identity at left, a quiet monitoring status chip at right.
+        header = ctk.CTkFrame(
+            self.root,
+            fg_color=UI_COLORS["surface"],
+            border_width=1,
+            border_color=UI_COLORS["border"],
+            corner_radius=16,
+        )
+        header.pack(fill=tk.X, padx=20, pady=(20, 10))
 
         title_group = ctk.CTkFrame(header, fg_color="transparent")
-        title_group.pack(side=tk.LEFT)
-        ctk.CTkLabel(
+        title_group.pack(side=tk.LEFT, padx=16, pady=13)
+        app_mark = ctk.CTkFrame(
             title_group,
-            text="📸 AUTOMARKER RE-ID",
-            font=("Segoe UI", 16, "bold"),
-            text_color="#E6EAF0",
+            width=40,
+            height=40,
+            corner_radius=12,
+            fg_color="#17345F",
+        )
+        app_mark.pack(side=tk.LEFT, padx=(0, 11))
+        app_mark.pack_propagate(False)
+        ctk.CTkLabel(
+            app_mark,
+            text="",
+            image=self._ui_icon("camera", "#B9DCFF", 21),
+        ).pack(expand=True)
+
+        title_copy = ctk.CTkFrame(title_group, fg_color="transparent")
+        title_copy.pack(side=tk.LEFT)
+        ctk.CTkLabel(
+            title_copy,
+            text="AutoMarker Re-ID",
+            font=("Segoe UI", 17, "bold"),
+            text_color=UI_COLORS["text"],
         ).pack(anchor=tk.W)
         ctk.CTkLabel(
-            title_group,
-            text="Theo dõi Clipboard • Nhận diện và vẽ khung tự động",
+            title_copy,
+            text="Nhận ảnh Clipboard và đánh dấu kết quả tự động",
             font=("Segoe UI", 10),
-            text_color="#8E98A8",
+            text_color=UI_COLORS["muted"],
         ).pack(anchor=tk.W, pady=(1, 0))
 
-        self.lbl_status = ctk.CTkLabel(
+        status_chip = ctk.CTkFrame(
             header,
-            text="●",
-            text_color="#EF4444",
-            fg_color="transparent",
-            corner_radius=10,
-            font=("Segoe UI", 18, "bold"),
-            width=24,
-            height=24,
+            fg_color="#14251F",
+            corner_radius=12,
         )
-        self.lbl_status.pack(side=tk.RIGHT)
+        status_chip.pack(side=tk.RIGHT, padx=16, pady=15)
+        self.lbl_status = ctk.CTkLabel(
+            status_chip,
+            text="●",
+            text_color="#4ADE80",
+            fg_color="transparent",
+            font=("Segoe UI", 15, "bold"),
+            width=16,
+            height=28,
+        )
+        self.lbl_status.pack(side=tk.LEFT, padx=(10, 3))
+        ctk.CTkLabel(
+            status_chip,
+            text="Đang theo dõi",
+            font=("Segoe UI", 10, "bold"),
+            text_color="#AAF0C8",
+        ).pack(side=tk.LEFT, padx=(0, 11))
 
-        # Compact single-row action bar.  Keeping all actions above the log
-        # prevents the last control from being clipped when the window gets
-        # shorter.
-        action_bar = ctk.CTkFrame(self.root, fg_color="transparent")
-        action_bar.pack(fill=tk.X, padx=16, pady=(0, 8))
+        # Keep the management actions in one clear Windows 11-style surface.
+        action_card = ctk.CTkFrame(
+            self.root,
+            fg_color=UI_COLORS["surface"],
+            border_width=1,
+            border_color=UI_COLORS["border"],
+            corner_radius=14,
+        )
+        action_card.pack(fill=tk.X, padx=20, pady=(0, 10))
+        ctk.CTkLabel(
+            action_card,
+            text="QUẢN LÝ DỮ LIỆU",
+            font=("Segoe UI", 9, "bold"),
+            text_color=UI_COLORS["subtle"],
+        ).pack(anchor=tk.W, padx=14, pady=(10, 2))
+        action_bar = ctk.CTkFrame(action_card, fg_color="transparent")
+        action_bar.pack(fill=tk.X, padx=12, pady=(2, 12))
 
         ctk.CTkButton(
             action_bar,
-            text="🔄 Làm mới + OCR",
-            width=130,
-            height=28,
-            corner_radius=7,
-            font=("Segoe UI", 9, "bold"),
+            text="Làm mới OCR",
+            image=self._ui_icon("refresh", "#EAF4FF", 16),
+            compound="left",
+            width=132,
+            height=35,
+            corner_radius=10,
+            font=("Segoe UI", 10, "bold"),
             command=self.refresh_and_rebuild_cache,
-            fg_color="#0EA5A3",
-            hover_color="#0C8886",
-        ).pack(side=tk.LEFT, padx=(0, 5))
+            fg_color="#1677D2",
+            hover_color="#1265B4",
+        ).pack(side=tk.LEFT, padx=(0, 7))
 
         ctk.CTkButton(
             action_bar,
-            text="📚 Ảnh đã lưu",
-            width=100,
-            height=28,
-            corner_radius=7,
+            text="Thư viện",
+            image=self._ui_icon("folder", "#DCE8F8", 16),
+            compound="left",
+            width=112,
+            height=35,
+            corner_radius=10,
             command=self.open_library_window,
-            fg_color="#2A2F37",
-            hover_color="#353B45",
-            font=("Segoe UI", 9, "bold"),
-        ).pack(side=tk.LEFT, padx=(0, 5))
+            fg_color=UI_COLORS["secondary"],
+            hover_color=UI_COLORS["secondary_hover"],
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side=tk.LEFT, padx=(0, 7))
 
         ctk.CTkButton(
             action_bar,
-            text="Xóa log",
-            width=65,
-            height=28,
-            corner_radius=7,
+            text="Xóa nhật ký",
+            image=self._ui_icon("clear", "#B8C4D4", 15),
+            compound="left",
+            width=118,
+            height=35,
+            corner_radius=10,
             command=self.clear_logs,
             fg_color="transparent",
             border_width=1,
-            border_color="#3A414C",
-            hover_color="#2A2F37",
-            font=("Segoe UI", 9),
-        ).pack(side=tk.LEFT, padx=(0, 5))
+            border_color=UI_COLORS["border"],
+            hover_color=UI_COLORS["surface_hover"],
+            font=("Segoe UI", 10),
+        ).pack(side=tk.LEFT, padx=(0, 7))
 
         ctk.CTkButton(
             action_bar,
-            text="🗑 Xóa Query",
-            width=100,
-            height=28,
-            corner_radius=7,
+            text="Xóa Query",
+            image=self._ui_icon("delete", "#FFC2C9", 15),
+            compound="left",
+            width=116,
+            height=35,
+            corner_radius=10,
             command=self.clear_data,
             fg_color="transparent",
             border_width=1,
-            border_color="#7F3540",
-            text_color="#FCA5A5",
-            hover_color="#3A2025",
-            font=("Segoe UI", 9, "bold"),
-        ).pack(side=tk.LEFT, padx=(0, 8))
+            border_color="#7A3A47",
+            text_color="#FFC2C9",
+            hover_color="#3A2029",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side=tk.LEFT, padx=(0, 12))
 
         ctk.CTkLabel(
             action_bar,
-            text="LƯU:",
+            text="LƯU VÀO",
             font=("Segoe UI", 9, "bold"),
-            text_color="#8E98A8",
-        ).pack(side=tk.LEFT, padx=(0, 4))
+            text_color=UI_COLORS["subtle"],
+        ).pack(side=tk.LEFT, padx=(0, 6))
 
         self.cmb_capture_query = ctk.CTkOptionMenu(
             action_bar,
-            width=105,
-            height=28,
+            width=112,
+            height=35,
             dynamic_resizing=False,
             command=self.on_capture_query_selected,
+            corner_radius=10,
+            fg_color=UI_COLORS["secondary"],
+            button_color="#3C4A60",
+            button_hover_color="#4A5A72",
+            text_color=UI_COLORS["text"],
         )
-        self.cmb_capture_query.pack(side=tk.LEFT, padx=(0, 5))
+        self.cmb_capture_query.pack(side=tk.LEFT, padx=(0, 7))
 
         self.btn_next_capture_query = ctk.CTkButton(
             action_bar,
             text="Query trống",
-            height=28,
-            corner_radius=7,
-            width=95,
+            image=self._ui_icon("add", "#EFE7FF", 15),
+            compound="left",
+            height=35,
+            corner_radius=10,
+            width=124,
             command=self.select_next_empty_capture_query,
-            fg_color="#8B5CF6",
-            hover_color="#7C3AED",
-            font=("Segoe UI", 9, "bold"),
+            fg_color="#7057C9",
+            hover_color="#5E46B1",
+            font=("Segoe UI", 10, "bold"),
         )
         self.btn_next_capture_query.pack(side=tk.LEFT)
 
-        capture_bar = ctk.CTkFrame(self.root, fg_color="transparent")
-        capture_bar.pack(fill=tk.X, padx=16, pady=(0, 8))
+        capture_card = ctk.CTkFrame(
+            self.root,
+            fg_color="#151E2C",
+            border_width=1,
+            border_color="#294568",
+            corner_radius=14,
+        )
+        capture_card.pack(fill=tk.X, padx=20, pady=(0, 12))
+        ctk.CTkLabel(
+            capture_card,
+            text="CHỤP MÀN HÌNH",
+            font=("Segoe UI", 9, "bold"),
+            text_color="#79AEEB",
+        ).pack(anchor=tk.W, padx=14, pady=(10, 2))
+        capture_bar = ctk.CTkFrame(capture_card, fg_color="transparent")
+        capture_bar.pack(fill=tk.X, padx=12, pady=(2, 12))
 
         ctk.CTkButton(
             capture_bar,
-            text="✂ Chụp vùng",
-            width=138,
-            height=30,
-            corner_radius=7,
+            text="Chụp vùng",
+            image=self._ui_icon("target", "#F4F8FF", 17),
+            compound="left",
+            width=142,
+            height=38,
+            corner_radius=11,
             command=self.start_region_capture,
-            fg_color="#2563EB",
-            hover_color="#1D4ED8",
+            fg_color=UI_COLORS["primary"],
+            hover_color=UI_COLORS["primary_hover"],
             font=("Segoe UI", 10, "bold"),
-        ).pack(side=tk.LEFT, padx=(0, 6))
+        ).pack(side=tk.LEFT, padx=(0, 8))
 
         ctk.CTkButton(
             capture_bar,
-            text="↻ Chụp lại vùng trước",
-            width=172,
-            height=30,
-            corner_radius=7,
+            text="Chụp lại vùng trước",
+            image=self._ui_icon("repeat", "#D7E6F8", 16),
+            compound="left",
+            width=184,
+            height=38,
+            corner_radius=11,
             command=self.capture_last_region,
-            fg_color="#334155",
-            hover_color="#475569",
+            fg_color="#2B405C",
+            hover_color="#385474",
             font=("Segoe UI", 10, "bold"),
-        ).pack(side=tk.LEFT, padx=(0, 10))
+        ).pack(side=tk.LEFT, padx=(0, 16))
 
         ctk.CTkCheckBox(
             capture_bar,
@@ -601,46 +744,56 @@ class AutoMarkerApp:
             variable=self.save_direct_captures,
             onvalue=True,
             offvalue=False,
-            checkbox_width=18,
-            checkbox_height=18,
+            checkbox_width=20,
+            checkbox_height=20,
             font=("Segoe UI", 10),
-            text_color="#CBD5E1",
-            fg_color="#2563EB",
-            hover_color="#1D4ED8",
+            text_color="#D6E2F1",
+            fg_color=UI_COLORS["primary"],
+            hover_color=UI_COLORS["primary_hover"],
+            border_color="#70839C",
         ).pack(side=tk.LEFT)
 
         # Body: sidebar (left) + content (right)
         body = ctk.CTkFrame(self.root, fg_color="transparent")
-        body.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+        body.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
 
         # -------- SIDEBAR (left) --------
-        sidebar = ctk.CTkFrame(body, width=205, fg_color="#1E2228", corner_radius=12, border_width=1, border_color="#2A2F37")
+        sidebar = ctk.CTkFrame(
+            body,
+            width=224,
+            fg_color=UI_COLORS["surface"],
+            corner_radius=14,
+            border_width=1,
+            border_color=UI_COLORS["border"],
+        )
         sidebar.pack(side=tk.LEFT, fill=tk.Y)
         sidebar.pack_propagate(False)
 
         lbl_side_folder = ctk.CTkLabel(
             sidebar,
-            text="📁 THƯ MỤC MẪU",
+            text="THƯ MỤC MẪU",
+            image=self._ui_icon("folder", "#8FC5FF", 15),
+            compound="left",
             font=("Segoe UI", 10, "bold"),
-            text_color="#E6EAF0",
+            text_color=UI_COLORS["text"],
         )
-        lbl_side_folder.pack(anchor=tk.W, padx=12, pady=(12, 6))
+        lbl_side_folder.pack(anchor=tk.W, padx=14, pady=(14, 6))
 
         self.lbl_folder_summary = ctk.CTkLabel(
             sidebar,
             text="Đang tải danh sách...",
             font=("Segoe UI", 9),
-            text_color="#8E98A8",
+            text_color=UI_COLORS["muted"],
         )
-        self.lbl_folder_summary.pack(anchor=tk.W, padx=12, pady=(0, 7))
+        self.lbl_folder_summary.pack(anchor=tk.W, padx=14, pady=(0, 9))
 
         # The folder tree below is the primary picker. The OptionMenu is kept
         # unpacked only because the hotkey/tray code paths still call `.set()`
         # on a widget tagged `cmb_queries` to stay in sync.
         self.cmb_queries = ctk.CTkOptionMenu(
             sidebar,
-            width=180,
-            height=30,
+            width=196,
+            height=34,
             dynamic_resizing=False,
             command=self.on_query_selected,
         )
@@ -650,9 +803,9 @@ class AutoMarkerApp:
         # tree holding many CTkButton items makes dragging the window laggy.
         # Native tk items have no canvas redraw cost on resize.
         # Use standard dark colors that match CTk's default dark theme
-        tree_bg = "#1E2228"
+        tree_bg = UI_COLORS["surface"]
         tree_wrap = tk.Frame(sidebar, bg=tree_bg, bd=0, highlightthickness=0)
-        tree_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        tree_wrap.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
         self.folder_tree = tk.Canvas(
             tree_wrap, bg=tree_bg, bd=0, highlightthickness=0
@@ -680,40 +833,48 @@ class AutoMarkerApp:
         )
 
         # -------- CONTENT (right) --------
-        content = ctk.CTkFrame(body, fg_color="transparent")
-        content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(12, 0))
+        content = ctk.CTkFrame(
+            body,
+            fg_color=UI_COLORS["surface"],
+            corner_radius=14,
+            border_width=1,
+            border_color=UI_COLORS["border"],
+        )
+        content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(14, 0))
 
         log_header = ctk.CTkFrame(content, fg_color="transparent")
-        log_header.pack(fill=tk.X, pady=(1, 5))
+        log_header.pack(fill=tk.X, padx=14, pady=(13, 7))
         ctk.CTkLabel(
             log_header,
             text="NHẬT KÝ HOẠT ĐỘNG",
+            image=self._ui_icon("activity", "#8FC5FF", 15),
+            compound="left",
             font=("Segoe UI", 10, "bold"),
-            text_color="#CBD2DC",
+            text_color=UI_COLORS["text"],
         ).pack(side=tk.LEFT)
         ctk.CTkLabel(
             log_header,
             text="Tự cuộn theo sự kiện mới",
             font=("Segoe UI", 9),
-            text_color="#687384",
+            text_color=UI_COLORS["subtle"],
         ).pack(side=tk.RIGHT)
 
         log_frame = tk.Frame(
             content,
-            bg="#12151A",
+            bg="#10141B",
             highlightthickness=1,
-            highlightbackground="#2A2F37",
+            highlightbackground=UI_COLORS["border"],
         )
-        log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 14))
         
         scrollbar = ctk.CTkScrollbar(log_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.txt_logs = tk.Text(
             log_frame,
-            bg="#12151A",
-            fg="#E6EAF0",
-            insertbackground="#E6EAF0",
+            bg="#10141B",
+            fg=UI_COLORS["text"],
+            insertbackground=UI_COLORS["text"],
             font=("Consolas", 10),
             relief="flat",
             bd=0,
@@ -836,10 +997,10 @@ class AutoMarkerApp:
 
         active = os.path.basename(self.current_queries_dir)
         root_selected = self.current_queries_dir == QUERIES_DIR
-        hover_bg = "#262B33"
-        normal_bg = "#1E2228"
-        selected_bg = "#3B82F6"
-        normal_fg = "#E6EAF0"
+        hover_bg = UI_COLORS["surface_hover"]
+        normal_bg = UI_COLORS["surface"]
+        selected_bg = "#245FAD"
+        normal_fg = "#DCE5F1"
         selected_fg = "#FFFFFF"
 
         def make_item(text, selected, command):
