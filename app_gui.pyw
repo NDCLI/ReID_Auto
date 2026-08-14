@@ -1426,15 +1426,6 @@ class AutoMarkerApp:
         # Keep the PhotoImage on the app so Tk does not garbage-collect it.
         self._region_capture_photo = ImageTk.PhotoImage(screenshot)
         canvas.create_image(0, 0, anchor=tk.NW, image=self._region_capture_photo)
-        canvas.create_text(
-            16,
-            16,
-            anchor=tk.NW,
-            text="Kéo chuột để chọn vùng  •  Esc để hủy",
-            fill="#FFFFFF",
-            font=("Segoe UI", 11, "bold"),
-            activefill="#FFFFFF",
-        )
         canvas.bind("<ButtonPress-1>", self._on_region_capture_press)
         canvas.bind("<B1-Motion>", self._on_region_capture_drag)
         canvas.bind("<ButtonRelease-1>", self._on_region_capture_release)
