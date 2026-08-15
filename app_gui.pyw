@@ -2140,39 +2140,50 @@ class AutoMarkerApp:
         from PIL import Image
 
         bgr_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        h, w = bgr_image.shape[:2]
 
-        def on_editor_saved(new_bgr):
-            edited_pil = Image.fromarray(cv2.cvtColor(new_bgr, cv2.COLOR_BGR2RGB))
+        is_reid_ui = self.check_is_reid_interface(bgr_image)
+        is_wide_row = (w > h) and not is_reid_ui
+
+        if is_wide_row:
+            def on_editor_saved(new_bgr):
+                edited_pil = Image.fromarray(cv2.cvtColor(new_bgr, cv2.COLOR_BGR2RGB))
+                
+                    # Save the edited version to output directories if enabled
+                if self._should_save_direct_capture():
+                    saved_path = self._save_direct_capture_image(edited_pil)
+                    if saved_path:
+                        print(f"  [CAPTURE] Đã lưu ảnh gốc (sau chỉnh sửa): {saved_path}")
+
+                detected_at = time.perf_counter()
+                self.is_processing = True
+                print(f"  [CAPTURE] Đã chỉnh sửa {capture_label}; đang nhận diện...")
+                
+                threading.Thread(
+                    target=self.process_clipboard_image,
+                    args=(edited_pil, detected_at),
+                    daemon=True,
+                ).start()
+
+            # Disable topmost attributes on main root if it exists
+            self.root.attributes("-topmost", False)
             
-            # Save the edited version to output directories if enabled
-            if self._should_save_direct_capture():
-                saved_path = self._save_direct_capture_image(edited_pil)
-                if saved_path:
-                    print(f"  [CAPTURE] Đã lưu ảnh gốc (sau chỉnh sửa): {saved_path}")
+            def on_editor_cancelled():
+                # Restore main window if user cancels
+                try:
+                    self.root.deiconify()
+                    self.root.after(10, self.root.focus_force)
+                except (tk.TclError, AttributeError):
+                    pass
 
+            # Open editor window
+            ImageEditorWindow(self.root, bgr_image, on_save_callback=on_editor_saved, on_cancel_callback=on_editor_cancelled, title="Chỉnh sửa ảnh chụp")
+        else:
+            if self._should_save_direct_capture():
+                saved_path = self._save_direct_capture_image(pil_img)
             detected_at = time.perf_counter()
             self.is_processing = True
-            print(f"  [CAPTURE] Đã chỉnh sửa {capture_label}; đang nhận diện...")
-            
-            threading.Thread(
-                target=self.process_clipboard_image,
-                args=(edited_pil, detected_at),
-                daemon=True,
-            ).start()
-
-        # Disable topmost attributes on main root if it exists
-        self.root.attributes("-topmost", False)
-        
-        def on_editor_cancelled():
-            # Restore main window if user cancels
-            try:
-                self.root.deiconify()
-                self.root.after(10, self.root.focus_force)
-            except (tk.TclError, AttributeError):
-                pass
-
-        # Open editor window
-        ImageEditorWindow(self.root, bgr_image, on_save_callback=on_editor_saved, on_cancel_callback=on_editor_cancelled, title="Chỉnh sửa ảnh chụp")
+            threading.Thread(target=self.process_clipboard_image, args=(pil_img, detected_at), daemon=True).start()
 
     def _should_save_direct_capture(self):
         save_toggle = getattr(self, "save_direct_captures", None)
@@ -2329,7 +2340,12 @@ class AutoMarkerApp:
             
             # A portrait crop is a Query sample; a Re-ID UI screenshot is a
             # search result that needs boxes. Both arrive through Clipboard.
+            # NOTE: The editor is intentionally NOT opened here — clipboard images
+            # come from external tools (ShareX, Snipping Tool, etc.) and should
+            # be processed directly. The editor only opens for in-app captures
+            # (Alt+PrintScreen / Alt+S) via _submit_direct_capture.
             if not self.check_is_reid_interface(current_bgr):
+                h, w = current_bgr.shape[:2]
                 if self.auto_query_capture_enabled and self.query_collector:
                     try:
                         # Always use the selected target query
@@ -2445,10 +2461,8 @@ class AutoMarkerApp:
             # sample is a single portrait person crop — taller than wide, and small.
             # Reject those outright so a copied crop is never mistaken for the UI.
             if w <= h:
-                print(f"  [REID DETECT] Portrait image ({w}x{h}) → treated as Query crop, not interface.")
                 return False
-            if w < 900:
-                print(f"  [REID DETECT] Image too small ({w}x{h}) → treated as Query crop, not interface.")
+            if w < 600:
                 return False
 
             if h < th or w < tw:
