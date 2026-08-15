@@ -2030,6 +2030,16 @@ class AutoMarkerApp:
         # the physical key state with GetAsyncKeyState every 50 ms as a
         # reliable fallback — works regardless of which window has focus.
         self._esc_poll_timer = self.root.after(50, self._poll_escape_key)
+        # Safety net for an interrupted drag, focus loss, or Tk exception.
+        self._capture_watchdog_timer = self.root.after(
+            30000, self._capture_watchdog
+        )
+
+    def _capture_watchdog(self):
+        """Release a forgotten region overlay/grab after a bounded timeout."""
+        if getattr(self, "region_capture_overlay", None) is not None:
+            print("  [CAPTURE] Watchdog giải phóng overlay vùng chụp bị treo.")
+            self.cancel_region_capture()
 
     def _poll_escape_key(self):
         """Cancel region capture when Escape is pressed, even without Tk focus."""
@@ -2095,6 +2105,13 @@ class AutoMarkerApp:
         self._region_capture_rect = None
         self._region_capture_image = None
         self._region_capture_photo = None
+        watchdog_timer = getattr(self, "_capture_watchdog_timer", None)
+        self._capture_watchdog_timer = None
+        if watchdog_timer is not None:
+            try:
+                self.root.after_cancel(watchdog_timer)
+            except (tk.TclError, ValueError):
+                pass
         # Stop the Escape-key polling timer
         esc_timer = getattr(self, "_esc_poll_timer", None)
         if esc_timer is not None:

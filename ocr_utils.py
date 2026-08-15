@@ -132,6 +132,7 @@ def _get_rapidocr_engine():
 
 
 def warm_up_card_ocr() -> bool:
+    global _RAPIDOCR_AVAILABLE, _RAPIDOCR_ENGINE
     """Load RapidOCR and warm its recognition-only path.
 
     Card crops already isolate a single timestamp line, so the detector and
@@ -147,7 +148,14 @@ def warm_up_card_ocr() -> bool:
     with _RAPIDOCR_LOCK:
         try:
             engine(sample, use_det=False, use_cls=False, use_rec=True)
-        except (OSError, RuntimeError, ValueError, TypeError):
+        except Exception as exc:
+            # Some RapidOCR/OpenVINO combinations reject ndarray input and
+            # attempt to interpret it as a filename (for example image.png).
+            # Disable this optional backend instead of allowing the error to
+            # affect clipboard, GUI, or mouse-hook processing.
+            _RAPIDOCR_AVAILABLE = False
+            _RAPIDOCR_ENGINE = None
+            print(f"[OCR] RapidOCR disabled after warm-up failure: {exc}")
             return False
     return True
 
@@ -215,6 +223,7 @@ def _rapidocr_variants(image_bgr: np.ndarray):
 
 
 def _rapidocr_timestamp(image_bgr: np.ndarray) -> Optional[str]:
+    global _RAPIDOCR_AVAILABLE, _RAPIDOCR_ENGINE
     """Extract a timestamp with RapidOCR using consensus across crop variants.
 
     Uses a lock for thread safety and stops as soon as two crop variants agree.
@@ -238,7 +247,10 @@ def _rapidocr_timestamp(image_bgr: np.ndarray) -> Optional[str]:
                     use_cls=False,
                     use_rec=True,
                 )
-            except (OSError, RuntimeError, ValueError, TypeError):
+            except Exception as exc:
+                _RAPIDOCR_AVAILABLE = False
+                _RAPIDOCR_ENGINE = None
+                print(f"[OCR] RapidOCR disabled after recognition failure: {exc}")
                 continue
         for text, confidence in _rapidocr_result_items(result):
             timestamp = _parse_time_ampm(text)
@@ -270,7 +282,10 @@ def _rapidocr_timestamp(image_bgr: np.ndarray) -> Optional[str]:
                         use_cls=True,
                         use_rec=True,
                     )
-                except (OSError, RuntimeError, ValueError, TypeError):
+                except Exception as exc:
+                    _RAPIDOCR_AVAILABLE = False
+                    _RAPIDOCR_ENGINE = None
+                    print(f"[OCR] RapidOCR disabled after detection failure: {exc}")
                     result = None
             parsed = [
                 (timestamp, confidence)
@@ -427,6 +442,7 @@ def _winocr_screenshot(image_bgr: np.ndarray) -> str:
 # ============================================================
 
 def _rapidocr_screenshot(image_bgr: np.ndarray) -> str:
+    global _RAPIDOCR_AVAILABLE, _RAPIDOCR_ENGINE
     """Run RapidOCR on the top 20% of a full Re-ID screenshot.
 
     The Re-ID UI shows the TIME filter in the top-left panel.
@@ -461,7 +477,10 @@ def _rapidocr_screenshot(image_bgr: np.ndarray) -> str:
                 use_cls=True,
                 use_rec=True,
             )
-        except (OSError, RuntimeError, ValueError, TypeError):
+        except Exception as exc:
+            _RAPIDOCR_AVAILABLE = False
+            _RAPIDOCR_ENGINE = None
+            print(f"[OCR] RapidOCR disabled after screenshot failure: {exc}")
             result = None
     if result is not None:
         for text, _conf in _rapidocr_result_items(result):
@@ -482,7 +501,10 @@ def _rapidocr_screenshot(image_bgr: np.ndarray) -> str:
                 use_cls=True,
                 use_rec=True,
             )
-        except (OSError, RuntimeError, ValueError, TypeError):
+        except Exception as exc:
+            _RAPIDOCR_AVAILABLE = False
+            _RAPIDOCR_ENGINE = None
+            print(f"[OCR] RapidOCR disabled after screenshot failure: {exc}")
             result2 = None
     if result2 is not None:
         for text, _conf in _rapidocr_result_items(result2):
