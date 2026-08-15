@@ -6,6 +6,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import app_gui
+import numpy as np
+import cv2
 
 
 class _FakePreviewWindow:
@@ -105,7 +107,7 @@ class TestClipboardCaptureRetry(unittest.TestCase):
         self.assertEqual(app.last_clipboard_sequence, 2)
         self.assertIsNone(app.pending_clipboard_sequence)
         thread_mock.assert_called_once()
-        thread_mock.return_value.start.assert_called_once()
+        self.assertEqual(thread_mock.return_value.start.call_count, 1)
 
     def test_last_region_image_can_arrive_after_one_second(self):
         """ShareX LastRegion must not lose a delayed first clipboard image."""
@@ -137,7 +139,7 @@ class TestClipboardCaptureRetry(unittest.TestCase):
         self.assertEqual(app.last_clipboard_sequence, 2)
         self.assertEqual(app.pending_clipboard_retries, 0)
         thread_mock.assert_called_once()
-        thread_mock.return_value.start.assert_called_once()
+        self.assertEqual(thread_mock.return_value.start.call_count, 1)
 
     def test_excel_foreground_does_not_block_sharex_owned_image(self):
         app = app_gui.AutoMarkerApp.__new__(app_gui.AutoMarkerApp)
@@ -165,7 +167,7 @@ class TestClipboardCaptureRetry(unittest.TestCase):
 
         self.assertEqual(app.last_clipboard_sequence, 2)
         thread_mock.assert_called_once()
-        thread_mock.return_value.start.assert_called_once()
+        self.assertEqual(thread_mock.return_value.start.call_count, 1)
 
     def test_non_sharex_image_is_ignored_while_excel_is_foreground(self):
         self.assertTrue(
@@ -246,6 +248,24 @@ class TestMainWindowControls(unittest.TestCase):
 
 
 class TestDirectRegionCapture(unittest.TestCase):
+    def test_missing_ui_template_rejects_reid_classification(self):
+        app = app_gui.AutoMarkerApp.__new__(app_gui.AutoMarkerApp)
+        with patch.object(app_gui.os.path, "exists", return_value=False):
+            self.assertFalse(app.check_is_reid_interface(np.zeros((100, 200, 3), dtype=np.uint8)))
+
+    def test_reid_ui_detection_does_not_return_before_template_matching(self):
+        app = app_gui.AutoMarkerApp.__new__(app_gui.AutoMarkerApp)
+        template = np.zeros((20, 30, 3), dtype=np.uint8)
+        image = np.zeros((400, 800, 3), dtype=np.uint8)
+        with patch.object(app_gui.os.path, "exists", return_value=True), patch.object(
+            cv2, "imread", return_value=template
+        ), patch.object(
+            cv2, "matchTemplate", return_value=np.array([[0.95]], dtype=np.float32)
+        ), patch.object(
+            cv2, "minMaxLoc", return_value=(0.0, 0.95, (0, 0), (0, 0))
+        ):
+            self.assertTrue(app.check_is_reid_interface(image))
+
     def test_normalize_capture_bounds_orders_drag_coordinates(self):
         self.assertEqual(
             app_gui.normalize_capture_bounds(90, 80, 10, 20), (10, 20, 90, 80)
@@ -297,9 +317,9 @@ class TestDirectRegionCapture(unittest.TestCase):
             app._submit_direct_capture(Image.new("RGB", (8, 6), "white"), "vùng đã chọn")
 
         self.assertTrue(app.is_processing)
-        thread_mock.assert_called_once()
+        self.assertEqual(thread_mock.call_count, 2)
         self.assertIs(thread_mock.call_args.kwargs["target"], app.process_clipboard_image)
-        thread_mock.return_value.start.assert_called_once()
+        self.assertEqual(thread_mock.return_value.start.call_count, 2)
 
     def test_direct_capture_saves_raw_image_when_enabled(self):
         from PIL import Image

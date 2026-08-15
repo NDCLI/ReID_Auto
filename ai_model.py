@@ -116,6 +116,10 @@ class AI_FeatureExtractor:
         print("Loading local ReID model(s)...")
         for raw_spec in model_specs:
             spec = raw_spec if isinstance(raw_spec, ModelSpec) else ModelSpec(**raw_spec)
+            if not np.isfinite(float(spec.weight)) or float(spec.weight) <= 0:
+                self.errors[spec.name] = "Model weight must be finite and positive"
+                print(f"  [SKIP] {spec.name}: invalid model weight")
+                continue
             try:
                 self.models[spec.name] = _OpenVINOEmbeddingModel(spec, base_dir)
                 self.weights[spec.name] = float(spec.weight)
@@ -154,16 +158,26 @@ class AI_FeatureExtractor:
         if img_bgr is None or img_bgr.size == 0:
             return {}
         selected = set(model_names) if model_names is not None else None
-        features = {
-            name: model.extract(img_bgr)
-            for name, model in self.models.items()
-            if selected is None or name in selected
-        }
+        features = {}
+        for name, model in self.models.items():
+            if selected is not None and name not in selected:
+                continue
+            try:
+                feature = model.extract(img_bgr)
+                if feature is not None and np.asarray(feature).size:
+                    features[name] = feature
+            except Exception as exc:
+                self.errors[name] = str(exc)
+                print(f"  [WARN] ReID inference failed for {name}: {exc}")
         from config import FACE_FEATURE_NAME
         if self.face_model is not None and (selected is None or FACE_FEATURE_NAME in selected):
-            face_feature = self.face_model.extract(img_bgr)
-            if face_feature is not None:
-                features[FACE_FEATURE_NAME] = face_feature
+            try:
+                face_feature = self.face_model.extract(img_bgr)
+                if face_feature is not None:
+                    features[FACE_FEATURE_NAME] = face_feature
+            except Exception as exc:
+                self.errors[FACE_FEATURE_NAME] = str(exc)
+                print(f"  [WARN] Face inference failed: {exc}")
         return features
 
     @staticmethod
@@ -179,6 +193,8 @@ class AI_FeatureExtractor:
         if not scores:
             return float("-inf"), scores
         total_weight = sum(self.weights[name] for name in scores)
+        if not np.isfinite(total_weight) or total_weight <= 0:
+            return float("-inf"), scores
         combined = sum(scores[name] * self.weights[name] for name in scores) / total_weight
         return float(combined), scores
     @staticmethod

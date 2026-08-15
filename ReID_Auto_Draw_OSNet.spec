@@ -21,7 +21,6 @@ hiddenimports = [
     "PIL.ImageTk",
     "rapidocr.inference_engine.base",
     "rapidocr.inference_engine.openvino.main",
-    "rapidocr.inference_engine.openvino.device",
     "rapidocr.ch_ppocr_det.main",
     "rapidocr.ch_ppocr_cls.main",
     "rapidocr.ch_ppocr_rec.main",

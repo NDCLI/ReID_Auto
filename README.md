@@ -44,11 +44,11 @@ Công cụ tự động hóa nhận diện nhân vật Re-ID và tự động v�
 ## 🛠 Hướng dẫn cài đặt & Khởi chạy
 
 ### Yêu cầu hệ thống
-* Hệ điều hành: Windows (7/10/11)
-* Python 3.8 trở lên
+* Hệ điều hành: Windows 10 1809 trở lên hoặc Windows 11
+* Python 3.11 trở lên (khuyến nghị chạy trong `.venv`)
 
 ### Các bước cài đặt:
-1. Double-click vào file **`install.bat`** để tự động tạo môi trường ảo Python và cài đặt đầy đủ các thư viện phụ thuộc cần thiết (`opencv`, `pillow`, `pystray`, `customtkinter`, `onnxruntime`, ...).
+1. Double-click vào file **`install.bat`** để tự động tạo môi trường ảo `.venv` và cài đặt các thư viện trong `requirements.txt`.
 2. Chuẩn bị các thư mục ảnh nhân vật mục tiêu cần đối sánh bên trong thư mục `queries/`.
 
 ### Khởi chạy:
@@ -70,7 +70,7 @@ Công cụ tự động hóa nhận diện nhân vật Re-ID và tự động v�
 * `create_shortcut.ps1`: Tạo shortcut **RE-ID Auto Draw** ngoài Desktop bằng icon của app.
 * `auto_marker.py`: Chứa các hàm giám sát clipboard, bộ lọc screenshot nâng cao, và thuật toán vẽ khung.
 * `preview_win.py`: Giao diện cửa sổ xem trước (Review) kết quả khớp khung đỏ.
-* `ai_model.py`: Trích xuất đặc trưng ảnh sử dụng mô hình MobileNetV2 ReID.
+* `ai_model.py`: Trích xuất đặc trưng ảnh bằng ensemble các model OSNet/OpenVINO.
 * `ui_template.png`: Ảnh mẫu giao diện dùng để xác thực nhanh screenshot Re-ID.
 * `.gitignore`: Cấu hình loại bỏ hoàn toàn dữ liệu tạm, file rác cá nhân khi đẩy lên GitHub.
 
@@ -112,7 +112,7 @@ dùng Snipping Tool, ShareX hoặc công cụ chụp màn hình bất kỳ để
 một. Ngay khi ảnh vào Clipboard, công cụ sẽ:
 
 1. Kiểm tra ảnh có phải crop dọc của một người hay không.
-2. So sánh bằng ensemble OSNet + OSNet-LCT + TransReID.
+2. So sánh bằng các model OSNet/OpenVINO hiện có.
 3. Lưu người giống nhau vào cùng `Query_N`.
 4. Tự tạo `Query_N` tiếp theo khi gặp người khác.
 5. Cập nhật matcher đang chạy mà không cần khởi động lại model.

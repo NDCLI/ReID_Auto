@@ -32,18 +32,27 @@ echo [OK] Da tim thay Python:
 python --version
 echo.
 
+:: Tao va su dung virtual environment rieng cho ung dung
+set "APP_DIR=%~dp0"
+if not exist "%APP_DIR%.venv\Scripts\python.exe" (
+    echo Dang tao moi truong ao .venv...
+    python -m venv "%APP_DIR%.venv"
+    if errorlevel 1 goto INSTALL_ERROR
+)
+set "PYTHON=%APP_DIR%.venv\Scripts\python.exe"
+
 :: Kiem tra cac thu vien da cai dat chua
 echo Dang kiem tra cac thu vien...
-python -c "import cv2, numpy, PIL, win32api, openvino, customtkinter, pystray, rapidocr" >nul 2>&1
+"%PYTHON%" -c "import cv2, numpy, PIL, win32api, openvino, customtkinter, pystray, rapidocr" >nul 2>&1
 IF %ERRORLEVEL% EQU 0 GOTO LIBS_FOUND
 
 :: Cap nhat pip
 echo Dang cap nhat cong cu pip...
-python -m pip install --upgrade pip >nul 2>&1
+"%PYTHON%" -m pip install --upgrade pip
 
 :: Cai dat thu vien
 echo Dang cai dat cac thu vien can thiet tu requirements.txt...
-python -m pip install -r requirements.txt
+"%PYTHON%" -m pip install -r requirements.txt
 
 IF %ERRORLEVEL% NEQ 0 (
     echo.
@@ -62,7 +71,7 @@ if not exist "%REID_MODEL_CACHE%" mkdir "%REID_MODEL_CACHE%"
 if not exist "%REID_MODEL_CACHE%\reid_0277.xml" (
     echo Dang tai model ReID 0277 chinh xac cao...
     curl.exe --fail --location --retry 3 "https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/person-reidentification-retail-0277/FP16/person-reidentification-retail-0277.xml" -o "%REID_MODEL_CACHE%\reid_0277.xml.download"
-    if errorlevel 1 goto MODEL_DOWNLOAD_ERROR
+if errorlevel 1 goto MODEL_DOWNLOAD_ERROR
     move /Y "%REID_MODEL_CACHE%\reid_0277.xml.download" "%REID_MODEL_CACHE%\reid_0277.xml" >nul
 )
 if not exist "%REID_MODEL_CACHE%\reid_0277.bin" (
@@ -125,5 +134,10 @@ exit /b 0
 echo.
 echo [LOI] Khong the tai model AI. Kiem tra ket noi mang roi chay lai install.bat.
 del /Q "%REID_MODEL_CACHE%\*.download" >nul 2>&1
+pause
+exit /b 1
+
+:INSTALL_ERROR
+echo [LOI] Khong tao duoc moi truong Python .venv.
 pause
 exit /b 1

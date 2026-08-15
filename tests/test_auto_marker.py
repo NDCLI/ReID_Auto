@@ -780,12 +780,9 @@ class TestFindMatchesFastRootFallback(unittest.TestCase):
     def test_empty_fast_result_falls_back_to_template_scan(self):
         from unittest.mock import patch
 
-        self.matcher._find_matches_fast_root = lambda _image: []
         with patch.object(auto_marker, "FAST_ROOT_MODE", True):
-            self.matcher.find_matches(np.zeros((200, 200, 3), dtype=np.uint8))
-        # Reaching the template scan at all (no exception) is the regression
-        # check; the fast path returned [] and must not short-circuit.
-        self.assertTrue(True)
+            result = self.matcher.find_matches(np.zeros((200, 200, 3), dtype=np.uint8))
+        self.assertEqual(result, [])
 
     def test_nonempty_fast_result_is_used_directly(self):
         from unittest.mock import patch

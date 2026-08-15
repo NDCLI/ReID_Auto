@@ -206,6 +206,10 @@ class TemplateMatcher:
                         continue
 
                     img_path = os.path.join(item_path, img_file)
+                    # Always bind the pixels to this iteration.  Reusing a
+                    # previous loop's ``img`` can pair a cached feature with
+                    # the wrong reference image.
+                    img = None
                     
                     if self._is_query_image(img_file):
                         img = cv2.imread(img_path)
@@ -261,8 +265,10 @@ class TemplateMatcher:
                             except Exception as e:
                                 log("WARN", f"Failed to save OCR cache: {e}")
 
-                    # Only read image if we didn't already read it and we need it for shape/reference
-                    img = cv2.imread(img_path) if 'img' not in locals() or img is None else img
+                    # Cached features/OCR still need the current image for
+                    # template matching and source-card identification.
+                    if img is None:
+                        img = cv2.imread(img_path)
                     if img is None:
                          continue
                          
@@ -903,7 +909,12 @@ class TemplateMatcher:
         with ThreadPoolExecutor() as executor:
             future_to_match = {executor.submit(process_match, m): m for m in matches}
             for future in as_completed(future_to_match):
-                match, is_kept, timestamp_key = future.result()
+                try:
+                    match, is_kept, timestamp_key = future.result()
+                except Exception as exc:
+                    source = future_to_match[future]
+                    log("WARN", f"OCR candidate failed for {source.get('bbox')}: {exc}")
+                    continue
                 if not is_kept:
                     continue
                 if timestamp_key is None:
@@ -1193,7 +1204,7 @@ class TemplateMatcher:
                 fast_matches = self._find_matches_fast_root(screenshot_bgr)
             finally:
                 self.reference_images = original_fast_refs
-            if fast_matches is not None:
+            if fast_matches:
                 # log("PERF", f"Fast grid done in {_time.time()-_t0:.1f}s")
                 return fast_matches
             # log("PERF", f"Fast grid fallback after {_time.time()-_t0:.1f}s")
@@ -1329,7 +1340,12 @@ class TemplateMatcher:
             with ThreadPoolExecutor() as executor:
                 future_to_m = {executor.submit(process_candidate, m): m for m in all_matches}
                 for future in as_completed(future_to_m):
-                    result = future.result()
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        source = future_to_m[future]
+                        log("WARN", f"Candidate failed for {source.get('bbox')}: {exc}")
+                        continue
                     if result:
                         verified_matches.append(result)
 
@@ -1816,10 +1832,13 @@ def process_image(matcher: TemplateMatcher, image_bgr: np.ndarray, debug: bool =
 def save_result(marked_bgr: np.ndarray, output_dir: str) -> str:
     """Save marked image to output directory, returns filepath."""
     os.makedirs(output_dir, exist_ok=True)
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    if marked_bgr is None or not isinstance(marked_bgr, np.ndarray) or marked_bgr.size == 0:
+        raise ValueError("Cannot save an empty image")
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     filename = f"marked_{timestamp}.png"
     filepath = os.path.join(output_dir, filename)
-    cv2.imwrite(filepath, marked_bgr)
+    if not cv2.imwrite(filepath, marked_bgr):
+        raise OSError(f"Failed to write image: {filepath}")
     return filepath
 
 
@@ -1859,25 +1878,48 @@ def save_result_with_metadata(
     target_dir = os.path.join(output_dir, query_name) if query_name else output_dir
     os.makedirs(target_dir, exist_ok=True)
 
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    if (marked_bgr is None or original_bgr is None or
+            not isinstance(marked_bgr, np.ndarray) or
+            not isinstance(original_bgr, np.ndarray) or
+            marked_bgr.size == 0 or original_bgr.size == 0):
+        raise ValueError("Cannot save empty result images")
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
     marked_filename = f"marked_{timestamp}.png"
     marked_filepath = os.path.join(target_dir, marked_filename)
-    cv2.imwrite(marked_filepath, marked_bgr)
+    if not cv2.imwrite(marked_filepath, marked_bgr):
+        raise OSError(f"Failed to write marked image: {marked_filepath}")
 
     original_filename = f"original_{timestamp}.png"
     original_filepath = os.path.join(target_dir, original_filename)
-    cv2.imwrite(original_filepath, original_bgr)
+    if not cv2.imwrite(original_filepath, original_bgr):
+        try:
+            os.remove(marked_filepath)
+        except OSError:
+            pass
+        raise OSError(f"Failed to write original image: {original_filepath}")
 
     json_filename = f"marked_{timestamp}.json"
     json_filepath = os.path.join(target_dir, json_filename)
-    with open(json_filepath, "w", encoding="utf-8") as f:
-        json.dump({
+    metadata = {
             "matches": _serialize_matches(matches),
             "marked_file": marked_filename,
             "original_file": original_filename,
             "timestamp": timestamp,
-        }, f, ensure_ascii=False, indent=2)
+        }
+    temp_json = json_filepath + ".tmp"
+    try:
+        with open(temp_json, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_json, json_filepath)
+    except Exception:
+        try:
+            os.remove(temp_json)
+        except OSError:
+            pass
+        raise
 
     return marked_filepath
 
@@ -1899,11 +1941,18 @@ def load_metadata(marked_filepath: str) -> dict | None:
 
     directory = os.path.dirname(marked_filepath)
     original_file = data.get("original_file", "")
-    original_path = os.path.join(directory, original_file)
+    if not isinstance(original_file, str) or not original_file:
+        return None
+    original_path = os.path.abspath(os.path.join(directory, original_file))
+    directory_abs = os.path.abspath(directory)
+    if os.path.commonpath([directory_abs, original_path]) != directory_abs:
+        return None
     if not os.path.isfile(original_path):
         return None
 
     matches = data.get("matches", [])
+    if not isinstance(matches, list):
+        return None
     for m in matches:
         if "bbox" in m and isinstance(m["bbox"], list):
             m["bbox"] = tuple(m["bbox"])
@@ -1923,8 +1972,19 @@ def update_metadata(marked_filepath: str, matches: list[dict]) -> None:
     except (json.JSONDecodeError, OSError):
         return
     data["matches"] = _serialize_matches(matches)
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    temp_path = json_path + ".tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, json_path)
+    except Exception:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        raise
 
 
 # ============================================================

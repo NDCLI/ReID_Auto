@@ -1689,15 +1689,42 @@ class AutoMarkerApp:
         capture_dir = DIRECT_CAPTURE_SAVE_DIRS[0] if DIRECT_CAPTURE_SAVE_DIRS else None
         if not capture_dir:
             return
-        # Each window is independent — allow multiple capture/library windows.
         from library_win import LibraryWindow
-        LibraryWindow(
-            self.root,
-            capture_dir,
-            on_close=None,
-            matcher=self.matcher,
-            enable_editor=True,
-        )
+        existing = getattr(self, "capture_library_window", None)
+        try:
+            if existing is not None and existing.winfo_exists():
+                existing.lift()
+                existing.focus_force()
+                return
+        except (tk.TclError, AttributeError):
+            pass
+
+        def on_close():
+            self.capture_library_window = None
+            # Keep the capture library consistent with the saved-results
+            # library: the main configuration window stays hidden until the
+            # library is closed.
+            try:
+                self.root.deiconify()
+                self.root.after(10, self.root.focus_force)
+            except (tk.TclError, AttributeError):
+                pass
+
+        self.root.withdraw()
+        try:
+            self.capture_library_window = LibraryWindow(
+                self.root,
+                capture_dir,
+                on_close=on_close,
+                matcher=self.matcher,
+                enable_editor=True,
+            )
+        except Exception:
+            # Do not leave the application hidden if the library could not be
+            # created (for example, when the capture directory is unavailable).
+            self.capture_library_window = None
+            self.root.deiconify()
+            raise
 
     def open_image_editor_standalone(self):
         """Open a file dialog and edit the selected image."""
@@ -2137,6 +2164,9 @@ class AutoMarkerApp:
             self.show_osd("⚠️ Ảnh chụp không hợp lệ")
             return
 
+        if getattr(self, "matcher", None) is not None:
+            self.matcher.ignore_next_clipboard = True
+
         # Copy captured image to clipboard in background (avoid blocking UI)
         try:
             from auto_marker import copy_image_to_clipboard
@@ -2147,6 +2177,8 @@ class AutoMarkerApp:
                     app.root.after(0, lambda: setattr(app, 'pending_clipboard_sequence', None))
                     print(f"  [CAPTURE] Đã copy ảnh {capture_label} vào clipboard")
                 except Exception as exc:
+                    if getattr(app, "matcher", None) is not None:
+                        app.matcher.ignore_next_clipboard = False
                     print(f"  [CAPTURE] Không thể copy vào clipboard: {exc}")
             threading.Thread(target=_bg_copy, args=(image.copy(), self), daemon=True).start()
         except Exception as exc:
@@ -2163,6 +2195,20 @@ class AutoMarkerApp:
 
         is_reid_ui = self.check_is_reid_interface(bgr_image)
         is_wide_row = (w > h) and not is_reid_ui
+
+        # Keep the processing path usable during startup/tests where a Tk root
+        # is not available yet. In the real application root is always set,
+        # so wide captures still open the editor normally.
+        if is_wide_row and getattr(self, "root", None) is None:
+            if self._should_save_direct_capture():
+                self._save_direct_capture_image(image)
+            self.is_processing = True
+            threading.Thread(
+                target=self.process_clipboard_image,
+                args=(image, time.perf_counter()),
+                daemon=True,
+            ).start()
+            return
 
         if is_wide_row:
             def on_editor_saved(new_bgr):
@@ -2197,7 +2243,9 @@ class AutoMarkerApp:
                 ).start()
 
             # Disable topmost attributes on main root if it exists
-            self.root.attributes("-topmost", False)
+            root = getattr(self, "root", None)
+            if root is not None:
+                root.attributes("-topmost", False)
             
             def on_editor_cancelled():
                 # Restore main window if user cancels
@@ -2474,12 +2522,12 @@ class AutoMarkerApp:
             template_path = os.path.join(RESOURCE_DIR, "ui_template.png")
             if not os.path.exists(template_path):
                 print(f"  [WARN] UI template not found at {template_path}. Skipping validation.")
-                return True
+                return False
                 
             template = cv2.imread(template_path)
             if template is None:
                 print("  [WARN] Failed to load UI template. Skipping validation.")
-                return True
+                return False
                 
             gray_img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
             gray_temp = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
@@ -2518,22 +2566,30 @@ class AutoMarkerApp:
             return best_val >= 0.70
         except (cv2.error, OSError, ValueError) as e:
             print(f"  [WARN] Error in check_is_reid_interface: {e}")
-            return True
+            return False
 
     def open_preview_window(
         self, current_bgr, matches, detected_at=None, matching_elapsed=None
     ):
         # Open preview window on Main Thread
         ui_started = time.perf_counter()
-        self.active_preview_window = PreviewWindow(
-            self.root,
-            current_bgr,
-            matches,
-            self.matcher,
-            OUTPUT_DIR,
-            on_close_callback=self._on_preview_window_closed,
-        )
-        self.is_processing = False
+        try:
+            self.active_preview_window = PreviewWindow(
+                self.root,
+                current_bgr,
+                matches,
+                self.matcher,
+                OUTPUT_DIR,
+                on_close_callback=self._on_preview_window_closed,
+            )
+        except Exception as exc:
+            print(f"  [PREVIEW ERROR] {exc}")
+            self.active_preview_window = None
+        finally:
+            self.is_processing = False
+        if self.active_preview_window is None:
+            self._sync_clipboard_snapshot()
+            return
         self._sync_clipboard_snapshot()
         if detected_at is not None:
             total = time.perf_counter() - detected_at

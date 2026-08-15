@@ -604,33 +604,29 @@ def extract_timestamp(image_bgr: np.ndarray, method: str = 'winocr') -> Optional
       2. AM/PM times: "7:00 AM", "12:00 PM"
       3. 24h times: "14:30:25"
 
-    Uses Windows OCR (winocr) first when available — it handles the
-    dark-themed Re-ID UI (white text on dark background) well.
-    Falls back to RapidOCR if winocr is unavailable or returns nothing.
+    Uses the requested backend. When the requested backend is unavailable or
+    returns no parseable text, the other backend is used as a fallback.
 
     Args:
         image_bgr: BGR image (full screenshot)
         method: OCR backend hint ('winocr' or 'rapidocr').
-                When winocr is available it is always tried first
-                regardless of this setting.
+                The selected backend is attempted first.
 
     Returns:
         Extracted date/time string, or None if nothing found.
     """
-    # --- Strategy 1: Windows OCR (best for dark UI) ---
-    if _WINOCR_AVAILABLE:
-        text = _winocr_screenshot(image_bgr)
+    method = (method or "winocr").lower()
+    if method not in {"winocr", "rapidocr"}:
+        raise ValueError("method must be 'winocr' or 'rapidocr'")
+    backends = ("winocr", "rapidocr") if method == "winocr" else ("rapidocr", "winocr")
+    for backend in backends:
+        if backend == "winocr" and not _WINOCR_AVAILABLE:
+            continue
+        text = _winocr_screenshot(image_bgr) if backend == "winocr" else _rapidocr_screenshot(image_bgr)
         if text:
             result = _parse_from_text(text)
             if result:
                 return result
-
-    # --- Strategy 2: RapidOCR fallback ---
-    text = _rapidocr_screenshot(image_bgr)
-    if text:
-        result = _parse_from_text(text)
-        if result:
-            return result
 
     return None
 
@@ -667,6 +663,9 @@ def _normalize_date_range(s: str) -> Tuple[int, int, int]:
     month = _MONTH_MAP.get(month_str, 0)
     day1 = int(m.group(2))
     day2 = int(m.group(3)) if m.group(3) else day1
+    import calendar
+    if month == 0 or day1 < 1 or day2 < day1 or day2 > calendar.monthrange(2024, month)[1]:
+        return (0, 0, 0)
     return (month, day1, day2)
 
 
@@ -677,6 +676,8 @@ def _normalize_time_to_minutes(s: str) -> Optional[int]:
     if m:
         h = int(m.group(1))
         mi = int(m.group(2))
+        if not (1 <= h <= 12 and 0 <= mi <= 59):
+            return None
         ampm = m.group(3).upper()
         if ampm == 'PM' and h != 12:
             h += 12
@@ -689,6 +690,8 @@ def _normalize_time_to_minutes(s: str) -> Optional[int]:
     if m:
         h = int(m.group(1))
         mi = int(m.group(2))
+        if not (0 <= h <= 23 and 0 <= mi <= 59):
+            return None
         return h * 60 + mi
 
     return None

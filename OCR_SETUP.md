@@ -18,8 +18,8 @@ Tính năng OCR đọc thời gian trên ảnh để so sánh và chỉ vẽ khu
 
 ### Full screenshot (quét TIME filter ở góc trên-trái)
 
-1. **Windows OCR** — đọc chữ trắng trên nền tối rất tốt.
-2. **RapidOCR** — fallback nếu Windows OCR không có hoặc không trả kết quả.
+1. Backend theo `OCR_METHOD` được thử trước.
+2. Backend còn lại được dùng làm fallback nếu engine đầu tiên không khả dụng hoặc không đọc được.
 
 ## Cài đặt
 

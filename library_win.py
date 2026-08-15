@@ -261,13 +261,11 @@ class LibraryWindow(ctk.CTkToplevel):
     def _on_select(self, _event=None):
         selection = self.listbox.curselection()
         if selection:
+            self._flush_edits()
             self.current_index = selection[0]
             self._show_current()
 
     def _show_current(self):
-        # Save any pending edits before switching to a different image
-        self._flush_edits()
-
         if not self.items:
             self.current_label.configure(text="Chưa có ảnh nào trong thư viện.")
             self.canvas.delete("all")
@@ -338,11 +336,13 @@ class LibraryWindow(ctk.CTkToplevel):
 
     def previous(self):
         if self.current_index > 0:
+            self._flush_edits()
             self.current_index -= 1
             self._show_current()
 
     def next(self):
         if self.current_index < len(self.items) - 1:
+            self._flush_edits()
             self.current_index += 1
             self._show_current()
 
@@ -477,10 +477,14 @@ class LibraryWindow(ctk.CTkToplevel):
         self._show_current()
 
     def close(self):
-        self._flush_edits()
-        if self.on_close_callback:
-            self.on_close_callback()
-        self.destroy()
+        try:
+            self._flush_edits()
+        finally:
+            try:
+                if self.on_close_callback:
+                    self.on_close_callback()
+            finally:
+                self.destroy()
 
     # ------------------------------------------------------------------
     # Click-to-toggle box editing (requires JSON sidecar + original image)

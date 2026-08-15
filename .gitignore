@@ -5,6 +5,7 @@ __pycache__/
 
 # PyInstaller
 *.spec
+!ReID_Auto_Draw_OSNet.spec
 build/
 dist/
 
