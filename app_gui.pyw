@@ -1017,7 +1017,36 @@ class AutoMarkerApp:
             fg_color=UI_COLORS["primary"],
             hover_color=UI_COLORS["primary_hover"],
             border_color="#70839C",
-        ).pack(side=tk.LEFT)
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        # Separator before capture tools
+        ctk.CTkFrame(
+            row1, fg_color=UI_COLORS["border"], width=1, height=18,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        ctk.CTkButton(
+            row1,
+            text="📂 Ảnh chụp",
+            width=94,
+            height=_btn_h,
+            corner_radius=_btn_r,
+            command=self.open_capture_library,
+            fg_color="#2A2F37",
+            hover_color="#353B45",
+            font=_btn_font,
+        ).pack(side=tk.LEFT, padx=(0, 4))
+
+        ctk.CTkButton(
+            row1,
+            text="✂ Sửa ảnh",
+            width=90,
+            height=_btn_h,
+            corner_radius=_btn_r,
+            command=self.open_image_editor_standalone,
+            fg_color="#2B405C",
+            hover_color="#385474",
+            font=_btn_font,
+        ).pack(side=tk.LEFT, padx=(0, 4))
 
         # — Row 2: destination selector —
         row2 = ctk.CTkFrame(toolbar_card, fg_color="transparent")
@@ -1650,7 +1679,66 @@ class AutoMarkerApp:
             except (OSError, PermissionError, IOError) as e:
                 messagebox.showerror("Lỗi", f"Lỗi khi xóa: {str(e)}")
 
+    def open_capture_library(self):
+        """Open a library window browsing the region-capture screenshots."""
+        # Use the first configured capture directory.
+        capture_dir = DIRECT_CAPTURE_SAVE_DIRS[0] if DIRECT_CAPTURE_SAVE_DIRS else None
+        if not capture_dir:
+            return
+        # Each window is independent — allow multiple capture/library windows.
+        from library_win import LibraryWindow
+        LibraryWindow(
+            self.root,
+            capture_dir,
+            on_close=None,
+            matcher=self.matcher,
+            enable_editor=True,
+        )
+
+    def open_image_editor_standalone(self):
+        """Open a file dialog and edit the selected image."""
+        from tkinter import filedialog
+        from image_editor import ImageEditorWindow
+        import cv2
+        path = filedialog.askopenfilename(
+            title="Chọn ảnh để chỉnh sửa",
+            filetypes=[
+                ("Ảnh", "*.png *.jpg *.jpeg *.bmp *.webp *.tiff"),
+                ("Tất cả", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        bgr = cv2.imread(path)
+        if bgr is None:
+            from tkinter import messagebox
+            messagebox.showerror("Lỗi", f"Không thể đọc ảnh:\n{path}")
+            return
+
+        def on_saved(new_bgr):
+            from PIL import Image
+            from auto_marker import copy_image_to_clipboard
+            import numpy as np
+            rgb = cv2.cvtColor(new_bgr, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(rgb)
+            # Ask whether to overwrite or save as new
+            from tkinter import messagebox
+            save_path = filedialog.asksaveasfilename(
+                title="Lưu ảnh",
+                initialfile=os.path.basename(path),
+                defaultextension=".png",
+                filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg"), ("Tất cả", "*.*")],
+            )
+            if save_path:
+                cv2.imwrite(save_path, new_bgr)
+            copy_image_to_clipboard(pil_img)
+            self.matcher.ignore_next_clipboard = True
+            self.show_osd("✔ Đã lưu & copy ảnh")
+
+        ImageEditorWindow(self.root, bgr, on_save_callback=on_saved, title="Chỉnh sửa ảnh")
+
     def open_library_window(self):
+
         existing = getattr(self, "active_preview_window", None)
         if existing is not None:
             try:
@@ -2035,7 +2123,7 @@ class AutoMarkerApp:
         self._submit_direct_capture(screenshot.crop(bounds).copy(), "vùng trước")
 
     def _submit_direct_capture(self, pil_img, capture_label):
-        """Run an in-app capture through the normal Re-ID/Review pipeline."""
+        """Run an in-app capture through the normal Re-ID/Review pipeline after optional editing."""
         if pil_img is None:
             return
         try:
@@ -2044,18 +2132,47 @@ class AutoMarkerApp:
             print(f"  [CAPTURE] Ảnh chụp không hợp lệ: {exc}")
             self.show_osd("⚠️ Ảnh chụp không hợp lệ")
             return
-        if self._should_save_direct_capture():
-            saved_path = self._save_direct_capture_image(image)
-            if saved_path:
-                print(f"  [CAPTURE] Đã lưu ảnh gốc: {saved_path}")
-        detected_at = time.perf_counter()
-        self.is_processing = True
-        print(f"  [CAPTURE] Đã chụp {capture_label}; đang nhận diện...")
-        threading.Thread(
-            target=self.process_clipboard_image,
-            args=(image, detected_at),
-            daemon=True,
-        ).start()
+
+        # Open the image editor immediately for the captured region
+        import cv2
+        import numpy as np
+        from image_editor import ImageEditorWindow
+        from PIL import Image
+
+        bgr_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+        def on_editor_saved(new_bgr):
+            edited_pil = Image.fromarray(cv2.cvtColor(new_bgr, cv2.COLOR_BGR2RGB))
+            
+            # Save the edited version to output directories if enabled
+            if self._should_save_direct_capture():
+                saved_path = self._save_direct_capture_image(edited_pil)
+                if saved_path:
+                    print(f"  [CAPTURE] Đã lưu ảnh gốc (sau chỉnh sửa): {saved_path}")
+
+            detected_at = time.perf_counter()
+            self.is_processing = True
+            print(f"  [CAPTURE] Đã chỉnh sửa {capture_label}; đang nhận diện...")
+            
+            threading.Thread(
+                target=self.process_clipboard_image,
+                args=(edited_pil, detected_at),
+                daemon=True,
+            ).start()
+
+        # Disable topmost attributes on main root if it exists
+        self.root.attributes("-topmost", False)
+        
+        def on_editor_cancelled():
+            # Restore main window if user cancels
+            try:
+                self.root.deiconify()
+                self.root.after(10, self.root.focus_force)
+            except (tk.TclError, AttributeError):
+                pass
+
+        # Open editor window
+        ImageEditorWindow(self.root, bgr_image, on_save_callback=on_editor_saved, on_cancel_callback=on_editor_cancelled, title="Chỉnh sửa ảnh chụp")
 
     def _should_save_direct_capture(self):
         save_toggle = getattr(self, "save_direct_captures", None)

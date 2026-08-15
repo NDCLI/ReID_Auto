@@ -5,6 +5,7 @@ from PIL import Image, ImageTk
 import cv2
 import time
 from config import RESOURCE_DIR
+from image_editor import ImageEditorWindow
 from auto_marker import (
     draw_match_boxes,
     save_result_with_metadata,
@@ -87,6 +88,19 @@ class PreviewWindow(ctk.CTkToplevel):
         )
         btn_cancel.pack(side=tk.RIGHT, padx=5)
         
+        self.btn_edit = ctk.CTkButton(
+            bot_frame,
+            text="✂ CẮT / SỬA",
+            width=110,
+            height=30,
+            corner_radius=8,
+            font=("Segoe UI", 11, "bold"),
+            command=self.open_editor,
+            fg_color="#1677D2",
+            hover_color="#1265B4"
+        )
+        self.btn_edit.pack(side=tk.RIGHT, padx=5)
+        
         btn_save = ctk.CTkButton(
             bot_frame, 
             text="LƯU & COPY", 
@@ -120,7 +134,25 @@ class PreviewWindow(ctk.CTkToplevel):
 
         self.draw_image()
 
+
+    def open_editor(self):
+        from image_editor import ImageEditorWindow
+        self.attributes("-topmost", False)
+        ImageEditorWindow(self, self.current_bgr, on_save_callback=self._on_editor_saved)
+
+    def _on_editor_saved(self, new_bgr):
+        self.current_bgr = new_bgr
+        # Re-run template matching with the edited image to update coordinates
+        if self.matcher:
+            from auto_marker import process_image
+            _, new_matches = process_image(self.matcher, self.current_bgr)
+            self.matches = new_matches
+        self.draw_image()
+        self.attributes("-topmost", True)
+        self.after(500, lambda: self.attributes("-topmost", False))
+
     def on_resize(self, event):
+
         if str(event.widget) == str(self):
             self.draw_image()
 

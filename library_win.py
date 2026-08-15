@@ -9,6 +9,7 @@ from tkinter import messagebox
 
 import customtkinter as ctk
 from PIL import Image, ImageTk
+from image_editor import ImageEditorWindow
 
 from auto_marker import (
     copy_image_to_clipboard,
@@ -90,14 +91,15 @@ def collect_saved_images(output_dir):
 
 
 class LibraryWindow(ctk.CTkToplevel):
-    def __init__(self, master, output_dir, on_close=None, matcher=None):
+    def __init__(self, master, output_dir, on_close=None, matcher=None, enable_editor=False):
         super().__init__(master)
-        self.title("Thư viện ảnh đã lưu")
+        self.title("Thư viện Ảnh Chụp Vùng" if enable_editor else "Thư viện Ảnh đã lưu (ReID)")
         self.geometry("1280x820")
         self.minsize(1000, 680)
         self.output_dir = output_dir
         self.on_close_callback = on_close
         self.matcher = matcher
+        self.enable_editor = enable_editor
         self.items = collect_saved_images(output_dir)
         self.current_index = 0
         self.photo = None
@@ -210,6 +212,16 @@ class LibraryWindow(ctk.CTkToplevel):
             hover_color="#DC2626",
             command=self.delete_current,
         ).pack(side=tk.RIGHT, padx=4)
+        if self.enable_editor:
+            ctk.CTkButton(
+                controls,
+                text="✂ SỬA",
+                width=80,
+                fg_color="#1677D2",
+                hover_color="#1265B4",
+                command=self.open_editor,
+            ).pack(side=tk.RIGHT, padx=4)
+        
         ctk.CTkButton(
             controls,
             text="COPY ẢNH (Ctrl+C)",
@@ -361,7 +373,69 @@ class LibraryWindow(ctk.CTkToplevel):
             pass
         return "break"
 
+
+    def open_editor(self):
+        if not self.items:
+            return
+        
+        # Prefer the clean original image if available; otherwise edit the marked image.
+        if self._edit_original_bgr is not None:
+            edit_img = self._edit_original_bgr.copy()
+        else:
+            if not self.photo:
+                return
+            item = self.items[self.current_index]
+            edit_img = cv2.imread(item["path"])
+            if edit_img is None:
+                return
+
+        self.attributes("-topmost", False)
+        ImageEditorWindow(self, edit_img, on_save_callback=self._on_editor_saved)
+
+    def _on_editor_saved(self, new_bgr):
+        if not self.items:
+            return
+        item = self.items[self.current_index]
+        filepath = item["path"]
+
+        # If we have a sidecar, re-run matching to update coordinates
+        if self._edit_original_bgr is not None:
+            self._edit_original_bgr = new_bgr.copy()
+            if self.matcher:
+                from auto_marker import process_image, save_result_with_metadata
+                import json
+                _, new_matches = process_image(self.matcher, self._edit_original_bgr)
+                self._edit_matches = new_matches
+                
+                # We need to overwrite the main image and sidecars.
+                # However, save_result_with_metadata creates a NEW unique filename
+                # based on timestamp!
+                # Since this is an existing item, let's just update its files directly.
+                marked_bgr = draw_match_boxes(self._edit_original_bgr.copy(), self._edit_matches)
+                cv2.imwrite(filepath, marked_bgr)
+                update_metadata(filepath, self._edit_matches)
+                
+                # Update the sidecar original image
+                base, _ = os.path.splitext(filepath)
+                sidecar_json = base + ".json"
+                try:
+                    with open(sidecar_json, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    orig_file = data.get("original_file", "")
+                    if orig_file:
+                        sidecar_original = os.path.join(os.path.dirname(filepath), orig_file)
+                        cv2.imwrite(sidecar_original, self._edit_original_bgr)
+                except Exception:
+                    pass
+                self._edit_dirty = False
+                self._draw_current()
+        else:
+            # Legacy image (no sidecar)
+            cv2.imwrite(filepath, new_bgr)
+            self._show_current()
+
     def delete_current(self):
+
         if not self.items:
             return
         self._edit_dirty = False  # Don't flush — we're deleting
@@ -414,6 +488,8 @@ class LibraryWindow(ctk.CTkToplevel):
 
     def _on_canvas_click(self, event):
         """Toggle a box at the click location (if metadata is available)."""
+        if self.enable_editor:
+            return  # disable box editing in capture/editor library
         if self._edit_original_bgr is None or self._edit_matches is None:
             return  # not editable (legacy image without sidecar)
         if not self.photo:
