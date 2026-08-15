@@ -613,7 +613,11 @@ class GlobalHotkeyManager:
                             self._excel_hwnd if self._fg_is_blaze
                             else self._blaze_hwnd
                         )
-                        _switch_to(target)
+                        # Defer heavy SetForegroundWindow out of hook proc
+                        # to avoid blocking the input chain (>200ms = freeze).
+                        threading.Thread(
+                            target=_switch_to, args=(target,), daemon=True
+                        ).start()
                     elif wParam == WM_MBUTTONUP and self._mclick_swallowed:
                         self._mclick_swallowed = False
                     return 1  # swallow
@@ -2133,6 +2137,21 @@ class AutoMarkerApp:
             self.show_osd("⚠️ Ảnh chụp không hợp lệ")
             return
 
+        # Copy captured image to clipboard in background (avoid blocking UI)
+        try:
+            from auto_marker import copy_image_to_clipboard
+            def _bg_copy(img, app):
+                try:
+                    copy_image_to_clipboard(img)
+                    app.root.after(0, lambda: setattr(app, 'last_clipboard_sequence', get_clipboard_sequence_number()))
+                    app.root.after(0, lambda: setattr(app, 'pending_clipboard_sequence', None))
+                    print(f"  [CAPTURE] Đã copy ảnh {capture_label} vào clipboard")
+                except Exception as exc:
+                    print(f"  [CAPTURE] Không thể copy vào clipboard: {exc}")
+            threading.Thread(target=_bg_copy, args=(image.copy(), self), daemon=True).start()
+        except Exception as exc:
+            print(f"  [CAPTURE] Không thể copy vào clipboard: {exc}")
+
         # Open the image editor immediately for the captured region
         import cv2
         import numpy as np
@@ -2148,7 +2167,19 @@ class AutoMarkerApp:
         if is_wide_row:
             def on_editor_saved(new_bgr):
                 edited_pil = Image.fromarray(cv2.cvtColor(new_bgr, cv2.COLOR_BGR2RGB))
-                
+                # Update clipboard with edited version in background
+                try:
+                    from auto_marker import copy_image_to_clipboard
+                    def _bg_copy_edited(img, app):
+                        try:
+                            copy_image_to_clipboard(img)
+                            app.root.after(0, lambda: setattr(app, 'last_clipboard_sequence', get_clipboard_sequence_number()))
+                            app.root.after(0, lambda: setattr(app, 'pending_clipboard_sequence', None))
+                        except Exception:
+                            pass
+                    threading.Thread(target=_bg_copy_edited, args=(edited_pil.copy(), self), daemon=True).start()
+                except Exception:
+                    pass
                     # Save the edited version to output directories if enabled
                 if self._should_save_direct_capture():
                     saved_path = self._save_direct_capture_image(edited_pil)
