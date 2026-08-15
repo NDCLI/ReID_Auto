@@ -487,6 +487,40 @@ class GlobalHotkeyManager:
         self._fg_timer_cb = TIMERPROC(_poll_foreground)
         user32.SetTimer(None, TIMER_ID_FG_POLL, TIMER_INTERVAL_MS, self._fg_timer_cb)
 
+        # --- Taskbar/tray detection for mouse hook ----------------------------
+        # Cache the taskbar class names so the hook callback can reject clicks
+        # whose cursor sits over the taskbar or system-tray overflow, exactly
+        # like the AHK MouseIsOverTaskbarOrTray() guard.  The check uses only
+        # WindowFromPoint + GetAncestor + GetClassNameW — all lightweight, no
+        # process queries.
+        _TASKBAR_CLASSES = {
+            "Shell_TrayWnd", "SecondaryTrayWnd", "NotifyIconOverflowWindow",
+        }
+        user32.WindowFromPoint.argtypes = [wintypes.POINT]
+        user32.WindowFromPoint.restype = wintypes.HWND
+        _GetAncestor = user32.GetAncestor
+        _GetAncestor.argtypes = [wintypes.HWND, ctypes.c_uint]
+        _GetAncestor.restype = wintypes.HWND
+        _GetClassNameW = user32.GetClassNameW
+        _GetClassNameW.argtypes = [wintypes.HWND, ctypes.c_wchar_p, ctypes.c_int]
+        _GetClassNameW.restype = ctypes.c_int
+
+        def _mouse_is_over_taskbar(pt_x, pt_y):
+            """Return True when the cursor is over the taskbar or tray area."""
+            try:
+                pt = wintypes.POINT(pt_x, pt_y)
+                child = user32.WindowFromPoint(pt)
+                if not child:
+                    return False
+                root = _GetAncestor(child, 2)  # GA_ROOT
+                if not root:
+                    root = child
+                buf = ctypes.create_unicode_buffer(64)
+                _GetClassNameW(root, buf, 64)
+                return buf.value in _TASKBAR_CLASSES
+            except Exception:
+                return False
+
         # --- Mouse hook (ultra-light: reads cached bools/HWNDs) ---------------
 
         # Windows blocks SetForegroundWindow unless the calling thread owns the
@@ -552,8 +586,17 @@ class GlobalHotkeyManager:
                 return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
             # ── Right-click in Blaze → Region Capture ──
+            # Skip when the cursor is over the taskbar/tray so the user can
+            # still right-click the system tray while Blaze is foreground.
             if wParam in (WM_RBUTTONDOWN, WM_RBUTTONUP):
                 if self._fg_is_blaze:
+                    # Read cursor position from MSLLHOOKSTRUCT.pt (first 8 bytes)
+                    pt_x = ctypes.c_long.from_address(lParam).value
+                    pt_y = ctypes.c_long.from_address(lParam + ctypes.sizeof(ctypes.c_long)).value
+                    if _mouse_is_over_taskbar(pt_x, pt_y):
+                        # Let Windows handle this click normally on the taskbar
+                        self._rclick_swallowed = False
+                        return user32.CallNextHookEx(None, nCode, wParam, lParam)
                     if wParam == WM_RBUTTONDOWN:
                         self._rclick_swallowed = True
                         self.app.root.after(0, self.app.start_region_capture)
@@ -1854,13 +1897,36 @@ class AutoMarkerApp:
         canvas.bind("<ButtonPress-1>", self._on_region_capture_press)
         canvas.bind("<B1-Motion>", self._on_region_capture_drag)
         canvas.bind("<ButtonRelease-1>", self._on_region_capture_release)
+        canvas.bind("<Escape>", self.cancel_region_capture)
         overlay.bind("<Escape>", self.cancel_region_capture)
         overlay.protocol("WM_DELETE_WINDOW", self.cancel_region_capture)
         overlay.focus_force()
+        canvas.focus_set()
         try:
             overlay.grab_set()
         except tk.TclError:
             pass
+        # The overlay is borderless and another app (Blaze) may still own the
+        # foreground, so Tk keyboard bindings alone cannot catch Escape.  Poll
+        # the physical key state with GetAsyncKeyState every 50 ms as a
+        # reliable fallback — works regardless of which window has focus.
+        self._esc_poll_timer = self.root.after(50, self._poll_escape_key)
+
+    def _poll_escape_key(self):
+        """Cancel region capture when Escape is pressed, even without Tk focus."""
+        if getattr(self, "region_capture_overlay", None) is None:
+            return
+        try:
+            import ctypes
+            # GetAsyncKeyState returns the physical key state regardless of
+            # which window has focus.  Bit 0x8000 = currently pressed.
+            VK_ESCAPE = 0x1B
+            if ctypes.windll.user32.GetAsyncKeyState(VK_ESCAPE) & 0x8000:
+                self.cancel_region_capture()
+                return
+        except (OSError, AttributeError):
+            pass
+        self._esc_poll_timer = self.root.after(50, self._poll_escape_key)
 
     def _on_region_capture_press(self, event):
         self._region_capture_start = (event.x, event.y)
@@ -1910,6 +1976,14 @@ class AutoMarkerApp:
         self._region_capture_rect = None
         self._region_capture_image = None
         self._region_capture_photo = None
+        # Stop the Escape-key polling timer
+        esc_timer = getattr(self, "_esc_poll_timer", None)
+        if esc_timer is not None:
+            try:
+                self.root.after_cancel(esc_timer)
+            except (tk.TclError, ValueError):
+                pass
+            self._esc_poll_timer = None
         if overlay is not None:
             try:
                 overlay.grab_release()
