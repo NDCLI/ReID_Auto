@@ -713,47 +713,72 @@ class TemplateMatcher:
 
         # At the top of a card the UI background is uniform, so combining a
         # few scanlines yields exact card edges even when a person is dark.
-        y1, y2 = row_bands[0]
-        scan = gray[min(y1 + 6, y2 - 1):min(y1 + 28, y2)]
-        if scan.size == 0:
-            return []
-        column_mask = np.max(scan, axis=0) > 30
-        segments = []
-        start = None
-        for x in range(int(screen_w * 0.28), screen_w):
-            active = bool(column_mask[x])
-            if active and start is None:
-                start = x
-            elif not active and start is not None:
-                width = x - start
-                if int(screen_w * 0.04) <= width <= int(screen_w * 0.09):
-                    segments.append((start, x))
-                start = None
-        if len(segments) < 4:
+        # The upper width bound is generous so an occasional wider/landscape
+        # card (e.g. a horizontal thumbnail interspersed among portrait cards)
+        # is still captured as a single card rather than dropped.
+        min_card_w = int(screen_w * 0.04)
+        max_card_w = int(screen_w * 0.14)
+
+        def _row_segments(ry1, ry2):
+            scan = gray[min(ry1 + 6, ry2 - 1):min(ry1 + 28, ry2)]
+            if scan.size == 0:
+                return []
+            column_mask = np.max(scan, axis=0) > 30
+            segs = []
+            start_x = None
+            for x in range(int(screen_w * 0.28), screen_w):
+                active = bool(column_mask[x])
+                if active and start_x is None:
+                    start_x = x
+                elif not active and start_x is not None:
+                    if min_card_w <= x - start_x <= max_card_w:
+                        segs.append((start_x, x))
+                    start_x = None
+            if start_x is not None and min_card_w <= screen_w - start_x <= max_card_w:
+                segs.append((start_x, screen_w))
+            return segs
+
+        # Establish a uniform pitch/width model from the row with the most
+        # regular (portrait-width) segments. This is only used as a per-row
+        # fallback when a row's own edges are too faint to detect (dark cards).
+        portrait_max = int(screen_w * 0.09)
+        model_segments = []
+        for ry1, ry2 in row_bands:
+            segs = _row_segments(ry1, ry2)
+            portrait = [(a, b) for a, b in segs if b - a <= portrait_max]
+            if len(portrait) > len(model_segments):
+                model_segments = portrait
+        if len(model_segments) < 4:
             return []
 
-        widths = [x2 - x1 for x1, x2 in segments]
+        widths = [x2 - x1 for x1, x2 in model_segments]
         card_width = int(round(float(np.median(widths))))
-        starts = [x1 for x1, _ in segments]
+        starts = [x1 for x1, _ in model_segments]
         gaps = [b - a for a, b in zip(starts, starts[1:]) if b - a < card_width * 1.5]
         pitch = int(round(float(np.median(gaps)))) if gaps else card_width + 4
         first_x = min(starts)
         if card_width < 40 or pitch <= card_width or pitch > card_width * 1.4:
             return []
 
-        columns = []
-        x = first_x
-        while x + card_width <= screen_w and len(columns) < 20:
-            columns.append((x, min(screen_w, x + card_width)))
-            x += pitch
-        if len(columns) < 4:
-            return []
+        def _projected_columns():
+            cols = []
+            x = first_x
+            while x + card_width <= screen_w and len(cols) < 20:
+                cols.append((x, min(screen_w, x + card_width)))
+                x += pitch
+            return cols
 
-        return [
-            (x1, ry1, x2, ry2)
-            for ry1, ry2 in row_bands
-            for x1, x2 in columns
-        ]
+        # Crop each row from its OWN detected segments so a wide/irregular card
+        # in one row cannot shift the crops of another. Rows whose edges are too
+        # faint fall back to the uniform projection.
+        boxes = []
+        for ry1, ry2 in row_bands:
+            row_cols = _row_segments(ry1, ry2)
+            if len(row_cols) < 4:
+                row_cols = _projected_columns()
+            for x1, x2 in row_cols:
+                boxes.append((x1, ry1, x2, ry2))
+        return boxes
 
     def _find_matches_fast_root(self, screenshot_bgr):
         """Two-stage grid classifier used when the root Query folder is active.

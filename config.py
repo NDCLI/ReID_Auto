@@ -200,6 +200,47 @@ OCR_TIMESTAMP_TOLERANCE = 0
 OCR_METHOD = 'winocr'
 
 # ============================================================
+# POSE / KEYPOINT MATCHING (MULTI-STAGE)
+# ============================================================
+# Pose matching bổ sung tín hiệu thứ tư (sau ReID + face + OCR): khung xương
+# người bất biến vị trí/tỉ lệ giúp phân biệt cùng người / khác người khi ReID
+# do dự vì đổi góc hoặc ánh sáng. Xem PLAN_POSE_MATCHING.md.
+#
+# CỜ NÀY MẶC ĐỊNH TẮT: bước hiện tại chỉ xây và kiểm chứng module
+# pose_extractor.py độc lập; phần tích hợp vào auto_marker.py (cache pose,
+# gate multi-stage, combined score) làm ở bước sau. Khi tắt, hành vi runtime
+# không đổi so với trước.
+ENABLE_POSE_MATCHING = False
+
+# Backend trích xuất pose. Hiện hỗ trợ "mediapipe" (33 landmark, chạy CPU).
+POSE_MODEL = "mediapipe"
+
+# Đường dẫn model .task cho MediaPipe Tasks API (PoseLandmarker). Các wheel
+# MediaPipe mới (Python 3.11+/3.13) bỏ API cũ mp.solutions.pose và chỉ còn Tasks
+# API, cần file model này. Nếu file không tồn tại, extractor tự lùi về API cũ
+# mp.solutions.pose khi có. Tải model lite tại:
+#   https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task
+POSE_TASK_MODEL = os.path.join("models", "pose_landmarker_lite.task")
+
+# Bỏ qua keypoint có độ tin cậy thấp hơn ngưỡng này khi dựng descriptor và khi
+# tính similarity (tránh để điểm che khuất kéo lệch kết quả).
+POSE_MIN_CONFIDENCE = 0.5
+
+# Stage 3 (soft gate): ứng viên có pose similarity dưới ngưỡng này bị loại.
+POSE_SIMILARITY_THRESHOLD = 0.25
+
+# Stage 1 (nới lỏng): hạ ngưỡng ReID ban đầu để bủa lưới rộng hơn, rồi để các
+# gate sau (OCR, pose) lọc dần. CHỈ có tác dụng khi phần tích hợp multi-stage
+# được nối dây ở bước sau; hiện chưa dùng trong flow.
+REID_INITIAL_THRESHOLD = 0.50
+
+# Trọng số điểm tổng hợp Stage 4 (nên tổng ~1.0): 60% ReID + 20% pose +
+# 20% thưởng khi OCR khớp timestamp chính xác.
+SCORE_WEIGHT_REID = 0.60
+SCORE_WEIGHT_POSE = 0.20
+SCORE_WEIGHT_OCR_BONUS = 0.20
+
+# ============================================================
 # LOGGING
 # ============================================================
 # Khi False (mặc định): chỉ hiển thị log cần thiết trên giao diện
