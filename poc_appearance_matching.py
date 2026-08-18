@@ -29,6 +29,10 @@ import cv2
 import config
 from appearance_extractor import AppearanceExtractor
 
+# Ngưỡng false-support tối đa chấp nhận được khi chọn APPEARANCE_RESCUE_MARGIN.
+MAX_FALSE_SUPPORT_RATE = 5.0
+MARGIN_SWEEP = [round(0.02 + 0.01 * i, 2) for i in range(14)]  # 0.02 … 0.15
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 QUERIES_DIR = os.path.join(BASE_DIR, "queries")
 
@@ -98,6 +102,103 @@ def auc_like(same, diff):
     return wins / (same.size * diff.size)
 
 
+def identity_scores(descriptor, people, top_k, min_refs, exclude=None):
+    """Reproduce the runtime aggregation: one score per identity.
+
+    Mirrors ``TemplateMatcher._appearance_scores_by_query`` — mean of the top-k
+    per-reference similarities, and an identity is only scored when it still has
+    ``min_refs`` usable descriptors. ``exclude`` is the (person, index) held out
+    so a crop is never compared against itself.
+    """
+    scored = []
+    for name, descs in people.items():
+        sims = [
+            AppearanceExtractor.compute_similarity(descriptor, ref)
+            for index, ref in enumerate(descs)
+            if exclude != (name, index)
+        ]
+        if len(sims) < min_refs:
+            continue
+        k = min(top_k, len(sims))
+        scored.append((float(np.mean(sorted(sims, reverse=True)[:k])), name))
+    scored.sort(reverse=True)
+    return scored
+
+
+def sweep_rescue_margin(people, floor):
+    """Leave-one-out sweep for APPEARANCE_RESCUE_MARGIN at the identity level.
+
+    The pair-level distribution above is NOT the runtime decision: at runtime a
+    tie is broken by (top-k mean per identity, then the top1-top2 gap). Picking a
+    threshold from pair statistics is exactly how the old
+    ``POSE_SIMILARITY_THRESHOLD=0.25`` ended up inert, so measure the real shape.
+
+    Prints, per candidate margin, how often the appearance tie-break would back
+    the WRONG identity (false support) versus the right one (true support), and
+    returns the smallest margin whose false-support rate is under
+    ``MAX_FALSE_SUPPORT_RATE`` — or None when no swept value is safe.
+    """
+    top_k = getattr(config, "AI_TOP_K_REFERENCES", 2)
+    min_refs = getattr(config, "APPEARANCE_MIN_REFERENCES", 2)
+
+    # One ranked identity list per held-out crop, computed once and reused for
+    # every margin in the sweep.
+    trials = []
+    for person, descs in people.items():
+        for index, descriptor in enumerate(descs):
+            ranked = identity_scores(
+                descriptor, people, top_k, min_refs, exclude=(person, index)
+            )
+            if len(ranked) < 2:
+                continue
+            (top_score, top_name), (second_score, _) = ranked[0], ranked[1]
+            trials.append((person, top_name, top_score, top_score - second_score))
+
+    if not trials:
+        print("\n[WARN] not enough crops for a leave-one-out margin sweep "
+              f"(need >= {min_refs + 1} per person).")
+        return None
+
+    # Baseline before any gate: does the identity-level top-1 even pick the right
+    # person, and how big are the gaps? Without this, a 0% false-support row is
+    # indistinguishable from a gate that simply never fires.
+    correct_top1 = sum(1 for t in trials if t[1] == t[0])
+    gaps = np.asarray([t[3] for t in trials])
+    print(f"\nIdentity-level leave-one-out sweep (n={len(trials)} held-out crops, "
+          f"top_k={top_k}, min_refs={min_refs}, floor={floor:.2f}):")
+    print(f"  top-1 identity correct (no gate): {correct_top1}/{len(trials)} "
+          f"({100.0 * correct_top1 / len(trials):.1f}%)")
+    print(f"  top1-top2 gap: min={gaps.min():.3f}  median={np.median(gaps):.3f}  "
+          f"max={gaps.max():.3f}")
+    print("  margin  true-support  false-support")
+
+    safe = None
+    for margin in MARGIN_SWEEP:
+        supported = [t for t in trials if t[2] >= floor and t[3] >= margin]
+        true_hits = sum(1 for t in supported if t[1] == t[0])
+        false_hits = len(supported) - true_hits
+        true_rate = 100.0 * true_hits / len(trials)
+        false_rate = 100.0 * false_hits / len(trials)
+        flag = ""
+        if false_rate <= MAX_FALSE_SUPPORT_RATE and safe is None and true_hits > 0:
+            safe = margin
+            flag = "  <-- smallest safe margin"
+        print(f"  {margin:.2f}    {true_rate:5.1f}%        {false_rate:5.1f}%{flag}")
+
+    if safe is None:
+        print(f"  [WARN] no margin in {MARGIN_SWEEP[0]:.2f}–{MARGIN_SWEEP[-1]:.2f} "
+              f"keeps false support under {MAX_FALSE_SUPPORT_RATE:.0f}% while still "
+              "firing — the tie-break would be either wrong or inert.")
+    else:
+        print(f"  => set APPEARANCE_RESCUE_MARGIN = {safe:.2f}")
+
+    configured = getattr(config, "APPEARANCE_RESCUE_MARGIN", None)
+    if configured is not None and safe is not None and configured < safe:
+        print(f"  [WARN] configured APPEARANCE_RESCUE_MARGIN={configured:.2f} is below "
+              f"the measured safe value {safe:.2f}.")
+    return safe
+
+
 def main():
     extractor = AppearanceExtractor()
     people = load_person_descriptors(extractor)
@@ -143,6 +244,7 @@ def main():
         if diff_pass > 95.0:
             print("  [WARN] floor passes nearly every different-person pair — "
                   "it is inert, like the old pose soft gate.")
+        sweep_rescue_margin(people, floor)
 
     if auc <= NO_SIGNAL_AUC:
         print(f"\n[FAIL] AUC {auc:.3f} <= {NO_SIGNAL_AUC:.2f}: no usable signal. "

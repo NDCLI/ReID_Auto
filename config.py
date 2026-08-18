@@ -207,25 +207,52 @@ OCR_METHOD = 'winocr'
 # vào đó mô tả KẾT CẤU quần áo bằng Local Binary Pattern (LBP) histogram —
 # đặc trưng phân biệt rẻ nhất còn lại, thuần OpenCV/NumPy, không thêm dependency.
 #
-# CỜ NÀY MẶC ĐỊNH TẮT: bước hiện tại chỉ xây và kiểm chứng module
-# appearance_extractor.py độc lập (unit test + PoC). Phần tích hợp vào
-# auto_marker.py (cache .appearance.npz, dùng làm rescue/tie-break như face
-# branch — KHÔNG phải hard gate) làm ở bước sau. Khi tắt, hành vi runtime
-# không đổi so với trước.
+# CỜ NÀY MẶC ĐỊNH TẮT (opt-in). Module đã được nối vào auto_marker.py, nhưng chỉ
+# ở MỘT chỗ duy nhất: khi ReID có margin quá nhỏ giữa top-1 và top-2 (không biết
+# là ai trong hai người) — xem TemplateMatcher._appearance_tie_break. Appearance
+# CHỈ được thêm match, KHÔNG bao giờ loại match, và KHÔNG trộn vào score.
+#
+# Vẫn để False vì bằng chứng còn mỏng: AUC 0.815 đo trên reference-vs-reference
+# (cùng buổi chụp, cùng khung), trong khi candidate thật là crop grid thô có dải
+# timestamp/padding khác — mà biên band LBP lại tính theo tỉ lệ chiều cao. Bật lên
+# là sửa một dòng; tắt lại thì hành vi khớp giống hệt trước khi tích hợp.
 ENABLE_APPEARANCE_MATCHING = False
 
 # Backend mô tả appearance. Hiện hỗ trợ "lbp" (LBP texture histogram).
 APPEARANCE_MODEL = "lbp"
 
-# Sàn similarity dùng ở bước tích hợp: ứng viên dưới ngưỡng này không được
-# appearance "cứu". Chỉ có tác dụng khi nối dây multi-stage ở bước sau; hiện
-# chưa dùng trong flow. Đây là tie-break/rescue, KHÔNG phải hard identity gate.
+# Sàn similarity tuyệt đối: appearance chỉ được "cứu" thế cân bằng khi điểm
+# appearance của identity thắng đạt ngưỡng này. Đây là tie-break/rescue, KHÔNG
+# phải hard identity gate — dưới ngưỡng nghĩa là "không có bằng chứng", không
+# phải "khác người".
 #
 # 0.75 lấy TỪ phân bố đo được trên queries/Query_1..3 (poc_appearance_matching.py):
 # giữ 94% cặp cùng người nhưng loại 46% cặp khác người. Đừng hạ xuống ~0.60 —
 # ở đó mọi cặp đều lọt (100% same / 100% diff), gate thành vô nghĩa đúng như
 # POSE_SIMILARITY_THRESHOLD=0.25 cũ.
 APPEARANCE_SIMILARITY_FLOOR = 0.75
+
+# Khoảng cách bắt buộc giữa điểm appearance của identity thắng và á quân. RIÊNG
+# sàn 0.75 vẫn cho qua 54% cặp khác người, nên chính cái gap này mới là bộ phân
+# biệt thật.
+#
+# 0.02 đo bằng sweep leave-one-out ở mức IDENTITY (không phải mức cặp) trong
+# poc_appearance_matching.py — tái hiện đúng cách runtime gộp điểm (mean top-k
+# rồi lấy gap top1-top2). Trên queries/: top-1 đúng người 8/12, gap median chỉ
+# 0.015, và ở 0.02 tie-break bắn cho 25% crop với 0% ủng hộ sai; từ 0.06 trở lên
+# nó không bao giờ bắn. Chọn ngưỡng từ thống kê mức CẶP là đúng cái sai đã khiến
+# POSE_SIMILARITY_THRESHOLD vô dụng — nếu đổi bộ reference thì đo lại bằng sweep.
+APPEARANCE_RESCUE_MARGIN = 0.02
+
+# Số reference có descriptor hợp lệ tối thiểu để một identity được chấm điểm
+# appearance (cùng tinh thần FACE_MIN_REFERENCES): một reference đơn lẻ dễ trùng
+# kết cấu ngẫu nhiên.
+APPEARANCE_MIN_REFERENCES = 2
+
+# Chỉ crop dáng người đứng mới được phán kết cấu: hai băng thân trên/thân dưới
+# vô nghĩa trên crop bẹt hay crop cỡ khuôn mặt. Thẻ kết quả thật ~82x189 px
+# (tỉ lệ ~2.3) nên 1.6 chỉ loại các trường hợp lệch hẳn khỏi dáng thẻ.
+APPEARANCE_MIN_ASPECT_RATIO = 1.6
 
 # Bỏ qua crop nhỏ hơn kích thước này (dựng histogram từ vài pixel là rác).
 APPEARANCE_MIN_CROP_HEIGHT = 20

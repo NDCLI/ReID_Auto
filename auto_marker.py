@@ -48,9 +48,13 @@ from config import (
     FAST_ROOT_MAX_ROWS, FACE_FEATURE_NAME, FACE_MATCH_THRESHOLD, FACE_MATCH_MARGIN,
     FACE_MIN_REFERENCES, TEMPLATE_REFS_PER_QUERY,
     ENABLE_OCR_TIMESTAMP_FILTER, OCR_TIMESTAMP_TOLERANCE, OCR_METHOD,
+    ENABLE_APPEARANCE_MATCHING, APPEARANCE_SIMILARITY_FLOOR,
+    APPEARANCE_RESCUE_MARGIN, APPEARANCE_MIN_REFERENCES,
+    APPEARANCE_MIN_ASPECT_RATIO,
     VERBOSE_LOGGING,
 )
 from ocr_utils import extract_timestamp, extract_reference_timestamp, timestamps_match
+from appearance_extractor import AppearanceExtractor
 
 
 # ============================================================
@@ -155,6 +159,13 @@ class TemplateMatcher:
         self.query_images = {}       # {query_name: cv2_image} - excluded from matching
         self.reference_timestamps = {}  # {query_name: [timestamp_string, ...]}
         self.reference_timestamps_by_ref = {}  # {(query_name, ref_name): timestamp}
+        # {(query_name, ref_name): {"descriptor": ndarray}} — kết cấu quần áo (LBP).
+        # Giữ trong RAM chứ không cache ra file: LBP rẻ hơn nhiều so với chi phí
+        # đọc đĩa, và mọi file `<img>.npz` lạ sẽ bị _prune_orphaned_cache xóa.
+        self.reference_appearance = {}
+        self.appearance_extractor = (
+            AppearanceExtractor() if ENABLE_APPEARANCE_MATCHING else None
+        )
         self.ai_extractor = AI_FeatureExtractor()
         self.query_thresholds = {}
         self._load_references(queries_dir)
@@ -274,6 +285,7 @@ class TemplateMatcher:
                          continue
                          
                     self.reference_images[query_name].append((img_file, img, feat))
+                    self._store_reference_appearance(query_name, img_file, img)
                     if ENABLE_OCR_TIMESTAMP_FILTER and ref_ts:
                         ref_timestamps_for_query.append(ref_ts)
                         self.reference_timestamps_by_ref[(query_name, img_file)] = ref_ts
@@ -332,6 +344,7 @@ class TemplateMatcher:
                             pass
                             
                     self.reference_images[query_name].append((item_name, img, feat))
+                    self._store_reference_appearance(query_name, item_name, img)
                     # log("REF", f"Root/{item_name} ({img.shape[1]}x{img.shape[0]})")
                 time.sleep(0.005)  # Yield CPU to keep GUI responsive
 
@@ -342,6 +355,24 @@ class TemplateMatcher:
         if ENABLE_OCR_TIMESTAMP_FILTER:
             log("OCR", f"Đã đọc xong thời gian trên {total_refs} ảnh mẫu.")
         self._calibrate_query_thresholds()
+
+    def _store_reference_appearance(self, query_name, ref_name, image):
+        """Describe a reference's clothing texture, if appearance is enabled.
+
+        Cheap enough to do inline (8 np.roll compares on a 64x128 gray image),
+        and _load_references already holds the decoded pixels, so this adds no
+        I/O. Failure is silent and simply means this reference cannot vote.
+        """
+        extractor = getattr(self, "appearance_extractor", None)
+        if extractor is None or not extractor.is_valid or image is None:
+            return
+        try:
+            payload = extractor.extract_descriptor(image)
+        except Exception as exc:
+            log("WARN", f"Appearance descriptor failed for {ref_name}: {exc}")
+            return
+        if payload is not None:
+            self.reference_appearance[(query_name, ref_name)] = payload
 
     def _calibrate_query_thresholds(self):
         """Estimate a conservative acceptance threshold for every identity."""
@@ -466,6 +497,118 @@ class TemplateMatcher:
         best["threshold"] = float(FACE_MATCH_THRESHOLD)
         return best
 
+    @staticmethod
+    def _models_agree_on(per_model_winners, query_name):
+        """True when no individual model prefers a different identity."""
+        if not AI_REQUIRE_MODEL_AGREEMENT or len(per_model_winners) <= 1:
+            return True
+        winners = [max(ranked)[1] for ranked in per_model_winners.values() if ranked]
+        return not any(winner != query_name for winner in winners)
+
+    def _appearance_scores_by_query(self, descriptor, reference_overrides=None):
+        """Score every identity by clothing texture, aggregated like the body path.
+
+        Mean of the top-AI_TOP_K_REFERENCES per-reference similarities, so the
+        number is comparable across identities with different reference counts.
+        Identities with fewer than APPEARANCE_MIN_REFERENCES usable descriptors are
+        dropped rather than scored on thin evidence. Returns a list of
+        (score, query_name, best_ref_name) sorted best-first.
+        """
+        reference_appearance = getattr(self, "reference_appearance", {})
+        if not reference_appearance:
+            return []
+
+        scored = []
+        for query_name, refs in self.reference_images.items():
+            if reference_overrides is not None:
+                refs = reference_overrides.get(query_name, [])
+            sims = []
+            best_ref_name = None
+            best_ref_score = float("-inf")
+            for ref_name, _ref_img, _ref_features in refs:
+                ref_payload = reference_appearance.get((query_name, ref_name))
+                if ref_payload is None:
+                    continue
+                score = AppearanceExtractor.compute_similarity(descriptor, ref_payload)
+                sims.append(score)
+                if score > best_ref_score:
+                    best_ref_score = score
+                    best_ref_name = ref_name
+            if len(sims) < APPEARANCE_MIN_REFERENCES:
+                continue
+            k = min(AI_TOP_K_REFERENCES, len(sims))
+            top = sorted(sims, reverse=True)[:k]
+            scored.append((float(np.mean(top)), query_name, best_ref_name))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return scored
+
+    def _appearance_tie_break(self, best, margin, candidate_bgr, reference_overrides=None):
+        """Break a top1-vs-top2 ReID tie with clothing texture, or decline.
+
+        This is the ONLY place appearance is consulted. It can only turn a
+        rejected tie into an acceptance — it never rejects, and it never touches
+        ``best['score']``, so ranking downstream stays pure ReID. Any missing
+        precondition returns None, meaning "no evidence", never "different person".
+
+        The signal is weak on its own (AUC 0.815, overlapping distributions), so
+        support requires three things at once: appearance must agree with ReID's
+        winner, clear the absolute floor, and beat the runner-up by
+        APPEARANCE_RESCUE_MARGIN. The gap is the real discriminator; the floor
+        alone still admits over half of different-person pairs.
+        """
+        if not ENABLE_APPEARANCE_MATCHING or candidate_bgr is None:
+            return None
+        extractor = getattr(self, "appearance_extractor", None)
+        if extractor is None or not extractor.is_valid:
+            return None
+
+        height, width = candidate_bgr.shape[:2]
+        if width <= 0 or height / width < APPEARANCE_MIN_ASPECT_RATIO:
+            # Two vertical body bands are meaningless on a squat crop.
+            return None
+
+        try:
+            descriptor = extractor.extract_descriptor(candidate_bgr)
+            if descriptor is None:
+                return None
+            scored = self._appearance_scores_by_query(
+                descriptor, reference_overrides=reference_overrides
+            )
+        except Exception as exc:
+            log("WARN", f"Appearance tie-break skipped: {exc}")
+            return None
+
+        if len(scored) < 2:
+            # Nothing to break a tie against.
+            return None
+        top_score, top_query, top_ref = scored[0]
+        second_score = scored[1][0]
+        appearance_margin = top_score - second_score
+
+        if (top_query != best['query']
+                or top_score < APPEARANCE_SIMILARITY_FLOOR
+                or appearance_margin < APPEARANCE_RESCUE_MARGIN):
+            return None
+
+        best['margin'] = float(margin)
+        best['threshold'] = float(
+            self.query_thresholds.get(best['query'], AI_MATCH_THRESHOLD)
+        )
+        best['reference_threshold'] = float(AI_BEST_REFERENCE_THRESHOLD)
+        best['source'] = "body+appearance"
+        best['appearance_rescue'] = True
+        best['appearance_score'] = float(top_score)
+        best['appearance_margin'] = float(appearance_margin)
+        best['appearance_ref_name'] = top_ref
+        log(
+            "RESCUE",
+            f"Appearance broke tie for {best['query']}: "
+            f"reid={best['score']:.3f} (margin={best['margin']:.3f}), "
+            f"appearance={top_score:.3f} (margin={appearance_margin:.3f})",
+        )
+        return best
+
     def _classify_features(self, candidate_features, allow_time_rescue=False, reference_overrides=None, candidate_bgr=None):
         """Apply the normal ensemble/open-set policy to existing embeddings."""
 
@@ -547,6 +690,20 @@ class TemplateMatcher:
                 # f"{best['query']} vs {second_query} — bỏ qua để tránh nhầm",
                 # )
                 pass
+            if face_result is not None:
+                return face_result
+            # "Top-1 và top-2 sát nhau" là câu hỏi DUY NHẤT kết cấu quần áo được
+            # phép trả lời: nó phân biệt hai người, không phán "có phải người quen
+            # không". Mọi ngưỡng nhận dạng tuyệt đối vẫn phải tự đứng vững trước.
+            if (not below_identity_threshold
+                    and best['best_reference_score'] >= AI_BEST_REFERENCE_THRESHOLD
+                    and self._models_agree_on(per_model_winners, best['query'])):
+                rescued = self._appearance_tie_break(
+                    best, margin, candidate_bgr,
+                    reference_overrides=reference_overrides,
+                )
+                if rescued is not None:
+                    return rescued
             return face_result
 
         pending_time_rescue = (
@@ -586,13 +743,8 @@ class TemplateMatcher:
                 best['card_timestamp'] = card_timestamp
                 best['time_confirmed'] = True
 
-        if AI_REQUIRE_MODEL_AGREEMENT and len(per_model_winners) > 1:
-            winners = []
-            for ranked in per_model_winners.values():
-                if ranked:
-                    winners.append(max(ranked)[1])
-            if winners and any(winner != best['query'] for winner in winners):
-                return face_result
+        if not self._models_agree_on(per_model_winners, best['query']):
+            return face_result
 
         if pending_time_rescue and face_result is not None:
             return face_result

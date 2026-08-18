@@ -100,6 +100,17 @@ class TestConfigConstants(unittest.TestCase):
         self.assertGreater(config.APPEARANCE_MIN_TEXTURE_STD, 0)
         self.assertEqual(len(config.APPEARANCE_NORMALIZED_SIZE), 2)
 
+    def test_appearance_rescue_config(self):
+        """Tie-break keys. The margin is the real discriminator, not the floor."""
+        # A margin of 0 would make the tie-break fire on any ranking at all; a
+        # large one makes it inert. 0.02 was measured by the PoC sweep.
+        self.assertGreater(config.APPEARANCE_RESCUE_MARGIN, 0.0)
+        self.assertLess(config.APPEARANCE_RESCUE_MARGIN, 0.5)
+        self.assertGreaterEqual(config.APPEARANCE_MIN_REFERENCES, 1)
+        # Result cards are ~82x189 px (~2.3); a ratio at or below 1.0 would let
+        # landscape crops get a torso/leg texture verdict.
+        self.assertGreater(config.APPEARANCE_MIN_ASPECT_RATIO, 1.0)
+
     def test_pose_config_is_fully_removed(self):
         """Pose failed its PoC and was deleted; no key may linger."""
         for name in dir(config):
