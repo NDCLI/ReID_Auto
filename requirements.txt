@@ -6,4 +6,3 @@ customtkinter>=5.2.0
 pystray>=0.19.5
 openvino>=2025.0.0
 rapidocr>=3.0.0
-mediapipe>=0.10
