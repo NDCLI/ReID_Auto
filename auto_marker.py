@@ -154,6 +154,7 @@ class TemplateMatcher:
         self.reference_images = {}   # {query_name: [(filename, cv2_image, feat), ...]}
         self.query_images = {}       # {query_name: cv2_image} - excluded from matching
         self.reference_timestamps = {}  # {query_name: [timestamp_string, ...]}
+        self.reference_timestamps_by_ref = {}  # {(query_name, ref_name): timestamp}
         self.ai_extractor = AI_FeatureExtractor()
         self.query_thresholds = {}
         self._load_references(queries_dir)
@@ -275,6 +276,7 @@ class TemplateMatcher:
                     self.reference_images[query_name].append((img_file, img, feat))
                     if ENABLE_OCR_TIMESTAMP_FILTER and ref_ts:
                         ref_timestamps_for_query.append(ref_ts)
+                        self.reference_timestamps_by_ref[(query_name, img_file)] = ref_ts
 
                     ts_info = f" | OCR: {ref_ts}" if ref_ts else ""
                     # log("REF", f"{query_name}/{img_file} ({img.shape[1]}x{img.shape[0]}){ts_info}")
@@ -731,7 +733,9 @@ class TemplateMatcher:
             # avoid recomputing the already extracted primary embedding.
             classification = self._classify_features(
                 features,
-                allow_time_rescue=True,
+                # OCR may reject an already-verified visual match, but it must
+                # never promote a below-threshold lookalike into a match.
+                allow_time_rescue=False,
             )
             classification = self._confirm_time_rescue(classification, crop)
             if classification:
@@ -893,6 +897,26 @@ class TemplateMatcher:
             if not card_ts:
                 # Unreadable time — do not reject, trust the AI score.
                 return match, True, None
+
+            # A readable card must agree with the timestamp of the specific
+            # reference that won the visual comparison.  Matching a different
+            # Query reference with the same identity is not sufficient: it can
+            # draw a lookalike from another time slot.
+            matched_ref_ts = getattr(self, "reference_timestamps_by_ref", {}).get(
+                (query_name, match.get("ref_name"))
+            )
+            if matched_ref_ts and not timestamps_match(
+                card_ts,
+                matched_ref_ts,
+                tolerance_minutes=OCR_TIMESTAMP_TOLERANCE,
+            ):
+                log(
+                    "OCR",
+                    f"Rejected {query_name} card at x={x1}: time {card_ts} "
+                    f"does not match visual reference {match.get('ref_name')} "
+                    f"({matched_ref_ts})",
+                )
+                return match, False, None
 
             reference_time = matching_reference_time(card_ts, ref_timestamps)
             if reference_time is None:
@@ -1329,7 +1353,9 @@ class TemplateMatcher:
                     return None
                 classification = self._classify_candidate(
                     candidate_bgr,
-                    allow_time_rescue=True,
+                    # OCR is a post-verification precision gate, not an
+                    # identity fallback for a visually weak candidate.
+                    allow_time_rescue=False,
                 )
                 if classification:
                     m_copy = dict(m)

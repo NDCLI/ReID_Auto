@@ -641,6 +641,32 @@ class TestCardTimestampGate(unittest.TestCase):
         self.assertIn(200, kept_x)   # unreadable → kept
         self.assertNotIn(300, kept_x)  # 11:32 AM stranger → rejected
 
+    def test_rejects_card_when_ocr_time_disagrees_with_winning_reference(self):
+        self.matcher.reference_timestamps_by_ref = {
+            ("Query_1", "ref_11_58.png"): "11:58 AM",
+            ("Query_1", "ref_11_56.png"): "11:56 AM",
+        }
+        self.matcher.reference_timestamps = {
+            "Query_1": ["11:58 AM", "11:56 AM"]
+        }
+        self.matcher._detect_result_grid = lambda _image: []
+        match = {
+            "bbox": (0, 10, 80, 196),
+            "query": "Query_1",
+            "ref_name": "ref_11_56.png",
+            "card_timestamp": "11:58 AM",
+            "score": 0.66,
+        }
+        from unittest.mock import patch
+
+        with patch_ocr_enabled(), patch.object(
+            auto_marker, "_snap_box_to_card", side_effect=lambda _gray, bbox: bbox
+        ):
+            result = self.matcher._filter_matches_by_card_timestamp(
+                [match], np.zeros((300, 200, 3), dtype=np.uint8)
+            )
+        self.assertEqual(result, [])
+
     def test_query_without_references_keeps_all(self):
         self.matcher.reference_timestamps = {}
         result = self._run(["3:00 PM", "9:99 ZZ"])

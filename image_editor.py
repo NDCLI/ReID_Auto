@@ -17,7 +17,7 @@ class ImageEditorWindow(ctk.CTkToplevel):
            - Kéo dọc cao hơn ngang (dy > dx) -> Cut-out Ngang.
         3. Thả chuột -> thực hiện cắt ngay lập tức.
         4. Ctrl+Z Hoàn tác, Đặt lại về ảnh gốc.
-        5. Lưu để trả kết quả về callback.
+        5. Ctrl+S / Enter để Lưu và trả kết quả về callback.
     """
 
     MODE_CROP = "crop"
@@ -75,11 +75,11 @@ class ImageEditorWindow(ctk.CTkToplevel):
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._cancel)
-        self.bind("<Escape>",   lambda _e: self._clear_sel_or_cancel())
-        self.bind("<Control-z>",lambda _e: self._undo())
-        self.bind("<Configure>",self._on_resize)
+        self._bind_shortcuts()
+        self.bind("<Configure>", self._on_resize)
 
         self._draw_image()
+        self.after_idle(self._draw_image)
 
     def _build_ui(self):
         # Toolbar (top)
@@ -152,6 +152,7 @@ class ImageEditorWindow(ctk.CTkToplevel):
         self._canvas.bind("<ButtonPress-1>",   self._on_press)
         self._canvas.bind("<B1-Motion>",        self._on_drag)
         self._canvas.bind("<ButtonRelease-1>",  self._on_release)
+        self._canvas.focus_set()
 
         # Bottom bar
         bot = ctk.CTkFrame(self, fg_color="transparent")
@@ -165,13 +166,23 @@ class ImageEditorWindow(ctk.CTkToplevel):
         ).pack(side=tk.RIGHT, padx=5)
 
         ctk.CTkButton(
-            bot, text="💾 LƯU", width=120, height=30, corner_radius=8,
+            bot, text="💾 LƯU  (Ctrl+S)", width=148, height=30, corner_radius=8,
             font=("Segoe UI", 11, "bold"),
             command=self._save,
             fg_color="#22C55E", hover_color="#16A34A"
         ).pack(side=tk.RIGHT, padx=5)
 
         self._set_mode(self.MODE_CROP)
+
+    def _bind_shortcuts(self):
+        """Bind on the Toplevel so shortcuts fire while any child has focus."""
+        self.bind("<Escape>",     lambda _e: self._clear_sel_or_cancel())
+        self.bind("<Control-z>",  lambda _e: self._undo())
+        self.bind("<Control-Z>",  lambda _e: self._undo())
+        self.bind("<Control-s>",  lambda _e: self._save())
+        self.bind("<Control-S>",  lambda _e: self._save())
+        self.bind("<Return>",     lambda _e: self._save())
+        self.bind("<KP_Enter>",   lambda _e: self._save())
 
     def _set_mode(self, mode: str):
         self._mode = mode
@@ -185,12 +196,12 @@ class ImageEditorWindow(ctk.CTkToplevel):
             btn.configure(**(active if m == mode else inactive))
 
         hints = {
-            self.MODE_CROP:   "Kéo chọn vùng giữ lại → Thả chuột để Crop",
-            self.MODE_CUTOUT: "Kéo ngang để cắt dải Dọc • Kéo dọc để cắt dải Ngang • Thả chuột để cắt",
+            self.MODE_CROP:   "Kéo chọn vùng giữ lại → Thả chuột để Crop  •  Ctrl+S / Enter để Lưu",
+            self.MODE_CUTOUT: "Kéo ngang = cắt dải Dọc • Kéo dọc = cắt dải Ngang  •  Ctrl+S / Enter để Lưu",
         }
         self._hint_var.set(hints.get(mode, ""))
 
-    def _draw_image(self):
+    def _draw_image(self, refit=True):
         self.update_idletasks()
         bgr = self._current_bgr
         ih, iw = bgr.shape[:2]
@@ -198,7 +209,8 @@ class ImageEditorWindow(ctk.CTkToplevel):
         cw = max(10, self._canvas.winfo_width())
         ch = max(10, self._canvas.winfo_height())
 
-        self._scale = min(cw / iw, ch / ih)
+        if refit:
+            self._scale = min(cw / iw, ch / ih)
         nw = int(iw * self._scale)
         nh = int(ih * self._scale)
         self._off_x = (cw - nw) // 2
@@ -241,6 +253,7 @@ class ImageEditorWindow(ctk.CTkToplevel):
         return int(ix * self._scale) + self._off_x, int(iy * self._scale) + self._off_y
 
     def _on_press(self, event):
+        self._canvas.focus_set()
         self._clear_selection()
         self._drag_start = self._clamp_to_image(event.x, event.y)
         self._drag_end   = self._drag_start
@@ -413,7 +426,7 @@ class ImageEditorWindow(ctk.CTkToplevel):
 
         self._history.append(new_bgr.copy())
         self._current_bgr = new_bgr.copy()
-        self._draw_image()
+        self._draw_image(refit=False)
 
     def _undo(self):
         if len(self._history) > 1:

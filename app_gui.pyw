@@ -677,14 +677,14 @@ class GlobalHotkeyManager:
         if not os.path.exists(QUERIES_DIR):
             return
         folders = [d for d in os.listdir(QUERIES_DIR) if os.path.isdir(os.path.join(QUERIES_DIR, d))]
-        
+
         import re
         def natural_sort_key(s):
             return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
         folders.sort(key=natural_sort_key)
-        
+
         all_options = ["Tất cả (Root queries folder)"] + folders
-        
+
         current_name = os.path.basename(self.app.current_queries_dir)
         if self.app.current_queries_dir == QUERIES_DIR:
             current_index = 0
@@ -692,15 +692,16 @@ class GlobalHotkeyManager:
             current_index = folders.index(current_name) + 1
         else:
             current_index = 0
-            
+
         if hotkey_id == 100: # PREV
             new_index = (current_index - 1) % len(all_options)
             self._select_index(all_options, new_index)
         elif hotkey_id == 101: # NEXT
             new_index = (current_index + 1) % len(all_options)
             self._select_index(all_options, new_index)
-        elif hotkey_id == 103: # Space in Blaze or global Shift+Space
-            self.app.select_next_empty_capture_query()
+        elif hotkey_id == 103: # Ctrl+Shift+N: only on Excel or Blaze
+            if self._fg_is_excel or self._fg_is_blaze:
+                self.app.select_next_empty_capture_query()
         elif 200 <= hotkey_id <= 209: # Ctrl+Shift+Q or 1 to 9
             digit = hotkey_id - 200
             if digit == 0:
@@ -1992,6 +1993,7 @@ class AutoMarkerApp:
         self._region_capture_image = screenshot
         self._region_capture_start = None
         self._region_capture_rect = None
+        self._region_capture_has_press = False
 
         overlay.overrideredirect(True)
         overlay.attributes("-topmost", True)
@@ -2059,6 +2061,7 @@ class AutoMarkerApp:
 
     def _on_region_capture_press(self, event):
         self._region_capture_start = (event.x, event.y)
+        self._region_capture_has_press = True
         canvas = event.widget
         if self._region_capture_rect is not None:
             canvas.delete(self._region_capture_rect)
@@ -2081,9 +2084,9 @@ class AutoMarkerApp:
         )
 
     def _on_region_capture_release(self, event):
-        if self._region_capture_start is None:
-            self.cancel_region_capture()
+        if self._region_capture_start is None or not getattr(self, '_region_capture_has_press', False):
             return
+        self._region_capture_has_press = False
         start_x, start_y = self._region_capture_start
         bounds = normalize_capture_bounds(start_x, start_y, event.x, event.y)
         screenshot = self._region_capture_image
@@ -2093,7 +2096,6 @@ class AutoMarkerApp:
             self.show_osd("⚠️ Vùng chụp quá nhỏ")
             return
         self.last_capture_region = bounds
-        # A successful capture returns the app to its normal tray workflow.
         self._restore_main_after_capture_cancel = False
         self._submit_direct_capture(screenshot.crop(bounds).copy(), "vùng đã chọn")
 
