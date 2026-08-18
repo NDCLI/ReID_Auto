@@ -695,6 +695,38 @@ class TestCardTimestampGate(unittest.TestCase):
         self.assertEqual(result[0]["bbox"][0], 100)
 
 
+class TestTimestampAwareVisualScope(unittest.TestCase):
+    def setUp(self):
+        self.matcher = auto_marker.TemplateMatcher.__new__(auto_marker.TemplateMatcher)
+        self.matcher.reference_timestamps = {"Query_1": ["11:51 AM", "11:52 AM"]}
+        self.matcher.reference_timestamps_by_ref = {
+            ("Query_1", "ref_51.png"): "11:51 AM",
+            ("Query_1", "ref_52.png"): "11:52 AM",
+        }
+        self.matcher.reference_images = {
+            "Query_1": [
+                ("ref_51.png", None, {"score": 0.90}),
+                ("ref_52.png", None, {"score": 0.99}),
+            ]
+        }
+        self.matcher.ai_extractor = _FakeExtractor()
+        self.matcher.query_thresholds = {"Query_1": 0.65}
+
+    def test_timestamp_scope_prevents_wrong_time_reference_from_winning(self):
+        scope = self.matcher._reference_scope_for_timestamp("11:51 AM")
+        self.assertEqual([item[0] for item in scope["Query_1"]], ["ref_51.png"])
+        result = self.matcher._classify_features(
+            {"fake_model": np.ones(1)}, reference_overrides=scope
+        )
+        self.assertEqual(result["ref_name"], "ref_51.png")
+
+    def test_timestamp_without_reference_rejects_candidate_scope(self):
+        self.assertEqual(self.matcher._reference_scope_for_timestamp("11:50 AM"), {})
+
+    def test_unreadable_timestamp_keeps_legacy_visual_scope(self):
+        self.assertIsNone(self.matcher._reference_scope_for_timestamp(None))
+
+
 # ---------------------------------------------------------------------------
 # Source-card removal
 # ---------------------------------------------------------------------------

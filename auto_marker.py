@@ -379,7 +379,42 @@ class TemplateMatcher:
                 # log("CALIBRATE", f"{query_name}: AI threshold={threshold:.3f} (need 2+ refs)")
                 pass
 
-    def _classify_candidate(self, candidate_bgr, allow_time_rescue=False):
+    def _reference_scope_for_timestamp(self, card_timestamp):
+        """Return references whose stored OCR time matches the card."""
+        if not (card_timestamp and self.reference_timestamps):
+            return None
+        scoped = {}
+        for query_name, refs in self.reference_images.items():
+            compatible = []
+            for ref_name, ref_img, ref_features in refs:
+                ref_ts = getattr(self, "reference_timestamps_by_ref", {}).get(
+                    (query_name, ref_name)
+                )
+                if ref_ts and timestamps_match(
+                    card_timestamp, ref_ts,
+                    tolerance_minutes=OCR_TIMESTAMP_TOLERANCE,
+                ):
+                    compatible.append((ref_name, ref_img, ref_features))
+            if compatible:
+                scoped[query_name] = compatible
+        return scoped
+
+    def _classify_card(self, candidate_bgr, allow_time_rescue=False):
+        """OCR first, then classify visually within the matching time bucket."""
+        card_ts = extract_reference_timestamp(candidate_bgr) if ENABLE_OCR_TIMESTAMP_FILTER else None
+        scope = self._reference_scope_for_timestamp(card_ts)
+        if scope == {}:
+            return None
+        result = self._classify_candidate(
+            candidate_bgr,
+            allow_time_rescue=allow_time_rescue,
+            reference_overrides=scope,
+        )
+        if result and card_ts:
+            result["card_timestamp"] = card_ts
+        return result
+
+    def _classify_candidate(self, candidate_bgr, allow_time_rescue=False, reference_overrides=None):
         """Classify a crop against every identity using open-set rejection."""
         candidate_features = self.ai_extractor.extract_feature(candidate_bgr)
         if not candidate_features:
@@ -388,13 +423,16 @@ class TemplateMatcher:
         classification = self._classify_features(
             candidate_features,
             allow_time_rescue=allow_time_rescue,
+            reference_overrides=reference_overrides,
         )
         return self._confirm_time_rescue(classification, candidate_bgr)
 
-    def _classify_face_features(self, candidate_features):
+    def _classify_face_features(self, candidate_features, reference_overrides=None):
         """Use a confident face match to rescue clothing-change cases."""
         query_results = []
         for query_name, refs in self.reference_images.items():
+            if reference_overrides is not None:
+                refs = reference_overrides.get(query_name, [])
             scores = []
             best_ref_name = None
             best_ref_score = float("-inf")
@@ -427,15 +465,20 @@ class TemplateMatcher:
         best["threshold"] = float(FACE_MATCH_THRESHOLD)
         return best
 
-    def _classify_features(self, candidate_features, allow_time_rescue=False):
+    def _classify_features(self, candidate_features, allow_time_rescue=False, reference_overrides=None):
         """Apply the normal ensemble/open-set policy to existing embeddings."""
 
-        face_result = self._classify_face_features(candidate_features)
+        face_result = self._classify_face_features(
+            candidate_features,
+            reference_overrides=reference_overrides,
+        )
 
         query_results = []
         per_model_winners = {name: [] for name in candidate_features}
 
         for query_name, refs in self.reference_images.items():
+            if reference_overrides is not None:
+                refs = reference_overrides.get(query_name, [])
             reference_scores = []
             model_scores = {name: [] for name in candidate_features}
             best_ref_name = None
@@ -584,11 +627,13 @@ class TemplateMatcher:
         )
         return classification
 
-    def _rank_features(self, candidate_features, model_names=None):
+    def _rank_features(self, candidate_features, model_names=None, reference_overrides=None):
         """Rank identities for a precomputed feature set without rejection."""
         selected = set(model_names) if model_names is not None else None
         ranked = []
         for query_name, refs in self.reference_images.items():
+            if reference_overrides is not None:
+                refs = reference_overrides.get(query_name, [])
             scores = []
             best_ref_name = None
             best_ref_score = float("-inf")
@@ -707,15 +752,34 @@ class TemplateMatcher:
         # The top-left card is the source query shown again by the Re-ID UI.
         boxes = boxes[1:]
         shortlist = []
+        fallback_candidates = []
         for bbox in boxes:
             x1, y1, x2, y2 = bbox
             crop = screenshot_bgr[y1:y2, x1:x2]
+            card_ts = extract_reference_timestamp(crop) if ENABLE_OCR_TIMESTAMP_FILTER else None
+            reference_scope = self._reference_scope_for_timestamp(card_ts)
+            if reference_scope == {}:
+                continue
             primary = self.ai_extractor.extract_feature(
                 crop, model_names=(FAST_ROOT_PRIMARY_MODEL,)
             )
-            ranked = self._rank_features(primary, (FAST_ROOT_PRIMARY_MODEL,))
+            if reference_scope is None:
+                ranked = self._rank_features(primary, (FAST_ROOT_PRIMARY_MODEL,))
+            else:
+                ranked = self._rank_features(
+                    primary,
+                    (FAST_ROOT_PRIMARY_MODEL,),
+                    reference_overrides=reference_scope,
+                )
             if ranked and ranked[0]["score"] >= FAST_ROOT_SHORTLIST_THRESHOLD:
-                shortlist.append((bbox, crop, primary, ranked[0]["score"]))
+                shortlist.append((bbox, crop, primary, ranked[0]["score"], card_ts, reference_scope))
+            elif (
+                ranked
+                and card_ts is None
+                and ranked[0]["score"] >= FAST_ROOT_SHORTLIST_THRESHOLD - 0.10
+                and len(fallback_candidates) < 5
+            ):
+                fallback_candidates.append((bbox, crop, primary, ranked[0]["score"], card_ts, reference_scope))
 
         matches = []
         remaining_models = tuple(
@@ -724,26 +788,34 @@ class TemplateMatcher:
         )
         if self.ai_extractor.face_model is not None:
             remaining_models += (FACE_FEATURE_NAME,)
-        for bbox, crop, primary, primary_score in shortlist:
+
+        combined_candidates = shortlist + fallback_candidates
+        for bbox, crop, primary, primary_score, card_ts, reference_scope in combined_candidates:
             features = dict(primary)
             features.update(
                 self.ai_extractor.extract_feature(crop, model_names=remaining_models)
             )
             # Reuse the normal conservative open-set classifier policy, but
             # avoid recomputing the already extracted primary embedding.
-            classification = self._classify_features(
-                features,
-                # OCR may reject an already-verified visual match, but it must
-                # never promote a below-threshold lookalike into a match.
-                allow_time_rescue=False,
-            )
-            classification = self._confirm_time_rescue(classification, crop)
+            if reference_scope is None:
+                classification = self._classify_features(
+                    features,
+                    allow_time_rescue=False,
+                )
+            else:
+                classification = self._classify_features(
+                    features,
+                    allow_time_rescue=False,
+                    reference_overrides=reference_scope,
+                )
             if classification:
                 classification.update({
                     "bbox": bbox,
                     "pixel_score": primary_score,
                     "scale": 1.0,
                 })
+                if card_ts:
+                    classification["card_timestamp"] = card_ts
                 matches.append(classification)
 
         matches = self._filter_matches_by_card_timestamp(matches, screenshot_bgr)
@@ -756,7 +828,7 @@ class TemplateMatcher:
         log(
             "FAST",
             f"Grid {len(boxes) + 1} cards, shortlisted {len(shortlist)}, "
-            f"accepted {len(matches)}",
+            f"fallback {len(fallback_candidates)}, accepted {len(matches)}",
         )
         return matches
 
@@ -1351,10 +1423,8 @@ class TemplateMatcher:
                 candidate_bgr = screenshot_bgr[y:y2, x:x2]
                 if candidate_bgr.shape[0] < 10 or candidate_bgr.shape[1] < 10:
                     return None
-                classification = self._classify_candidate(
+                classification = self._classify_card(
                     candidate_bgr,
-                    # OCR is a post-verification precision gate, not an
-                    # identity fallback for a visually weak candidate.
                     allow_time_rescue=False,
                 )
                 if classification:
