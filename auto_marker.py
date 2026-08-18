@@ -424,6 +424,7 @@ class TemplateMatcher:
             candidate_features,
             allow_time_rescue=allow_time_rescue,
             reference_overrides=reference_overrides,
+            candidate_bgr=candidate_bgr,
         )
         return self._confirm_time_rescue(classification, candidate_bgr)
 
@@ -465,7 +466,7 @@ class TemplateMatcher:
         best["threshold"] = float(FACE_MATCH_THRESHOLD)
         return best
 
-    def _classify_features(self, candidate_features, allow_time_rescue=False, reference_overrides=None):
+    def _classify_features(self, candidate_features, allow_time_rescue=False, reference_overrides=None, candidate_bgr=None):
         """Apply the normal ensemble/open-set policy to existing embeddings."""
 
         face_result = self._classify_face_features(
@@ -558,12 +559,32 @@ class TemplateMatcher:
             return face_result
 
         if best['best_reference_score'] < AI_BEST_REFERENCE_THRESHOLD:
-            # log(
-            # "REJECT",
-            # f"Ảnh tham chiếu tốt nhất {best['best_reference_score']:.3f}"
-            # f"<{AI_BEST_REFERENCE_THRESHOLD:.3f}; loại ứng viên mơ hồ",
-            # )
-            return face_result
+            # Check if card has exact timestamp match in reference scope
+            has_exact_time_match = False
+            if candidate_bgr is not None:
+                query_name = best['query']
+                reference_times = self.reference_timestamps.get(query_name, [])
+                card_timestamp = extract_reference_timestamp(candidate_bgr)
+                if card_timestamp and reference_times:
+                    has_exact_time_match = any(
+                        timestamps_match(
+                            card_timestamp,
+                            reference_time,
+                            tolerance_minutes=OCR_TIMESTAMP_TOLERANCE,
+                        )
+                        for reference_time in reference_times
+                    )
+
+            if not has_exact_time_match:
+                # log(
+                # "REJECT",
+                # f"Ảnh tham chiếu tốt nhất {best['best_reference_score']:.3f}"
+                # f"<{AI_BEST_REFERENCE_THRESHOLD:.3f}; loại ứng viên mơ hồ",
+                # )
+                return face_result
+            else:
+                best['card_timestamp'] = card_timestamp
+                best['time_confirmed'] = True
 
         if AI_REQUIRE_MODEL_AGREEMENT and len(per_model_winners) > 1:
             winners = []
@@ -801,12 +822,14 @@ class TemplateMatcher:
                 classification = self._classify_features(
                     features,
                     allow_time_rescue=False,
+                    candidate_bgr=crop,
                 )
             else:
                 classification = self._classify_features(
                     features,
                     allow_time_rescue=False,
                     reference_overrides=reference_scope,
+                    candidate_bgr=crop,
                 )
             if classification:
                 classification.update({
