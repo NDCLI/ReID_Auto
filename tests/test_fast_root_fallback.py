@@ -68,7 +68,8 @@ class TestFastRootFallback(unittest.TestCase):
 
                 with patch.object(self.matcher, "_rank_features", side_effect=mock_rank):
                     # Full ensemble accepts it
-                    def mock_classify(features, allow_time_rescue=False, reference_overrides=None):
+                    def mock_classify(features, allow_time_rescue=False, reference_overrides=None,
+                                      candidate_bgr=None):
                         return {
                             "query": "Query_8",
                             "ref_name": "ref_51.png",
@@ -112,7 +113,8 @@ class TestFastRootFallback(unittest.TestCase):
 
                 with patch.object(self.matcher, "_rank_features", side_effect=mock_rank):
                     # Ensemble rejects it (too weak)
-                    def mock_classify(features, allow_time_rescue=False, reference_overrides=None):
+                    def mock_classify(features, allow_time_rescue=False, reference_overrides=None,
+                                      candidate_bgr=None):
                         return None
 
                     with patch.object(self.matcher, "_classify_features", side_effect=mock_classify), \
@@ -150,7 +152,8 @@ class TestFastRootFallback(unittest.TestCase):
 
                 classify_call_count = 0
 
-                def mock_classify(features, allow_time_rescue=False, reference_overrides=None):
+                def mock_classify(features, allow_time_rescue=False, reference_overrides=None,
+                                      candidate_bgr=None):
                     nonlocal classify_call_count
                     classify_call_count += 1
                     return None

@@ -85,6 +85,39 @@ class TestConfigConstants(unittest.TestCase):
         self.assertTrue(0.0 <= config.IGNORE_LEFT_RATIO <= 1.0)
         self.assertTrue(0.0 <= config.IGNORE_BOTTOM_RATIO <= 1.0)
 
+    def test_appearance_matching_is_off_by_default(self):
+        """Appearance is validated standalone; runtime behavior must be unchanged."""
+        self.assertIs(config.ENABLE_APPEARANCE_MATCHING, False)
+
+    def test_appearance_config(self):
+        self.assertEqual(config.APPEARANCE_MODEL, "lbp")
+        self.assertTrue(0.0 <= config.APPEARANCE_SIMILARITY_FLOOR <= 1.0)
+        # A floor near 0.60 passes every pair on real data, making the gate inert
+        # the same way the old pose soft gate was.
+        self.assertGreater(config.APPEARANCE_SIMILARITY_FLOOR, 0.70)
+        self.assertIsInstance(config.APPEARANCE_MIN_CROP_HEIGHT, int)
+        self.assertIsInstance(config.APPEARANCE_MIN_CROP_WIDTH, int)
+        self.assertGreater(config.APPEARANCE_MIN_TEXTURE_STD, 0)
+        self.assertEqual(len(config.APPEARANCE_NORMALIZED_SIZE), 2)
+
+    def test_appearance_rescue_config(self):
+        """Tie-break keys. The margin is the real discriminator, not the floor."""
+        # A margin of 0 would make the tie-break fire on any ranking at all; a
+        # large one makes it inert. 0.02 was measured by the PoC sweep.
+        self.assertGreater(config.APPEARANCE_RESCUE_MARGIN, 0.0)
+        self.assertLess(config.APPEARANCE_RESCUE_MARGIN, 0.5)
+        self.assertGreaterEqual(config.APPEARANCE_MIN_REFERENCES, 1)
+        # Result cards are ~82x189 px (~2.3); a ratio at or below 1.0 would let
+        # landscape crops get a torso/leg texture verdict.
+        self.assertGreater(config.APPEARANCE_MIN_ASPECT_RATIO, 1.0)
+
+    def test_pose_config_is_fully_removed(self):
+        """Pose failed its PoC and was deleted; no key may linger."""
+        for name in dir(config):
+            self.assertFalse(name.startswith("POSE_"), name)
+            self.assertFalse(name.startswith("SCORE_WEIGHT_"), name)
+        self.assertFalse(hasattr(config, "ENABLE_POSE_MATCHING"))
+
     def test_fast_root_config(self):
         self.assertIsInstance(config.FAST_ROOT_MODE, bool)
         self.assertIsInstance(config.FAST_ROOT_PRIMARY_MODEL, str)

@@ -200,45 +200,73 @@ OCR_TIMESTAMP_TOLERANCE = 0
 OCR_METHOD = 'winocr'
 
 # ============================================================
-# POSE / KEYPOINT MATCHING (MULTI-STAGE)
+# APPEARANCE (CLOTHING TEXTURE) MATCHING — tín hiệu thứ tư
 # ============================================================
-# Pose matching bổ sung tín hiệu thứ tư (sau ReID + face + OCR): khung xương
-# người bất biến vị trí/tỉ lệ giúp phân biệt cùng người / khác người khi ReID
-# do dự vì đổi góc hoặc ánh sáng. Xem PLAN_POSE_MATCHING.md.
+# Thay cho thử nghiệm pose (đã bỏ): trên các crop thẻ kết quả bé (~82x189 px)
+# ai cũng đứng giống nhau nên khung xương không phân biệt được danh tính. Thay
+# vào đó mô tả KẾT CẤU quần áo bằng Local Binary Pattern (LBP) histogram —
+# đặc trưng phân biệt rẻ nhất còn lại, thuần OpenCV/NumPy, không thêm dependency.
 #
-# CỜ NÀY MẶC ĐỊNH TẮT: bước hiện tại chỉ xây và kiểm chứng module
-# pose_extractor.py độc lập; phần tích hợp vào auto_marker.py (cache pose,
-# gate multi-stage, combined score) làm ở bước sau. Khi tắt, hành vi runtime
-# không đổi so với trước.
-ENABLE_POSE_MATCHING = False
+# CỜ NÀY MẶC ĐỊNH TẮT (opt-in). Module đã được nối vào auto_marker.py, nhưng chỉ
+# ở MỘT chỗ duy nhất: khi ReID có margin quá nhỏ giữa top-1 và top-2 (không biết
+# là ai trong hai người) — xem TemplateMatcher._appearance_tie_break. Appearance
+# CHỈ được thêm match, KHÔNG bao giờ loại match, và KHÔNG trộn vào score.
+#
+# Vẫn để False vì bằng chứng còn mỏng: AUC 0.815 đo trên reference-vs-reference
+# (cùng buổi chụp, cùng khung), trong khi candidate thật là crop grid thô có dải
+# timestamp/padding khác — mà biên band LBP lại tính theo tỉ lệ chiều cao. Bật lên
+# là sửa một dòng; tắt lại thì hành vi khớp giống hệt trước khi tích hợp.
+ENABLE_APPEARANCE_MATCHING = False
 
-# Backend trích xuất pose. Hiện hỗ trợ "mediapipe" (33 landmark, chạy CPU).
-POSE_MODEL = "mediapipe"
+# Backend mô tả appearance. Hiện hỗ trợ "lbp" (LBP texture histogram).
+APPEARANCE_MODEL = "lbp"
 
-# Đường dẫn model .task cho MediaPipe Tasks API (PoseLandmarker). Các wheel
-# MediaPipe mới (Python 3.11+/3.13) bỏ API cũ mp.solutions.pose và chỉ còn Tasks
-# API, cần file model này. Nếu file không tồn tại, extractor tự lùi về API cũ
-# mp.solutions.pose khi có. Tải model lite tại:
-#   https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task
-POSE_TASK_MODEL = os.path.join("models", "pose_landmarker_lite.task")
+# Sàn similarity tuyệt đối: appearance chỉ được "cứu" thế cân bằng khi điểm
+# appearance của identity thắng đạt ngưỡng này. Đây là tie-break/rescue, KHÔNG
+# phải hard identity gate — dưới ngưỡng nghĩa là "không có bằng chứng", không
+# phải "khác người".
+#
+# 0.75 lấy TỪ phân bố đo được trên queries/Query_1..3 (poc_appearance_matching.py):
+# giữ 94% cặp cùng người nhưng loại 46% cặp khác người. Đừng hạ xuống ~0.60 —
+# ở đó mọi cặp đều lọt (100% same / 100% diff), gate thành vô nghĩa đúng như
+# POSE_SIMILARITY_THRESHOLD=0.25 cũ.
+APPEARANCE_SIMILARITY_FLOOR = 0.75
 
-# Bỏ qua keypoint có độ tin cậy thấp hơn ngưỡng này khi dựng descriptor và khi
-# tính similarity (tránh để điểm che khuất kéo lệch kết quả).
-POSE_MIN_CONFIDENCE = 0.5
+# Khoảng cách bắt buộc giữa điểm appearance của identity thắng và á quân. RIÊNG
+# sàn 0.75 vẫn cho qua 54% cặp khác người, nên chính cái gap này mới là bộ phân
+# biệt thật.
+#
+# 0.02 đo bằng sweep leave-one-out ở mức IDENTITY (không phải mức cặp) trong
+# poc_appearance_matching.py — tái hiện đúng cách runtime gộp điểm (mean top-k
+# rồi lấy gap top1-top2). Trên queries/: top-1 đúng người 8/12, gap median chỉ
+# 0.015, và ở 0.02 tie-break bắn cho 25% crop với 0% ủng hộ sai; từ 0.06 trở lên
+# nó không bao giờ bắn. Chọn ngưỡng từ thống kê mức CẶP là đúng cái sai đã khiến
+# POSE_SIMILARITY_THRESHOLD vô dụng — nếu đổi bộ reference thì đo lại bằng sweep.
+APPEARANCE_RESCUE_MARGIN = 0.02
 
-# Stage 3 (soft gate): ứng viên có pose similarity dưới ngưỡng này bị loại.
-POSE_SIMILARITY_THRESHOLD = 0.25
+# Số reference có descriptor hợp lệ tối thiểu để một identity được chấm điểm
+# appearance (cùng tinh thần FACE_MIN_REFERENCES): một reference đơn lẻ dễ trùng
+# kết cấu ngẫu nhiên.
+APPEARANCE_MIN_REFERENCES = 2
 
-# Stage 1 (nới lỏng): hạ ngưỡng ReID ban đầu để bủa lưới rộng hơn, rồi để các
-# gate sau (OCR, pose) lọc dần. CHỈ có tác dụng khi phần tích hợp multi-stage
-# được nối dây ở bước sau; hiện chưa dùng trong flow.
-REID_INITIAL_THRESHOLD = 0.50
+# Chỉ crop dáng người đứng mới được phán kết cấu: hai băng thân trên/thân dưới
+# vô nghĩa trên crop bẹt hay crop cỡ khuôn mặt. Thẻ kết quả thật ~82x189 px
+# (tỉ lệ ~2.3) nên 1.6 chỉ loại các trường hợp lệch hẳn khỏi dáng thẻ.
+APPEARANCE_MIN_ASPECT_RATIO = 1.6
 
-# Trọng số điểm tổng hợp Stage 4 (nên tổng ~1.0): 60% ReID + 20% pose +
-# 20% thưởng khi OCR khớp timestamp chính xác.
-SCORE_WEIGHT_REID = 0.60
-SCORE_WEIGHT_POSE = 0.20
-SCORE_WEIGHT_OCR_BONUS = 0.20
+# Bỏ qua crop nhỏ hơn kích thước này (dựng histogram từ vài pixel là rác).
+APPEARANCE_MIN_CROP_HEIGHT = 20
+APPEARANCE_MIN_CROP_WIDTH = 8
+
+# Chuẩn hóa scale (rộng, cao) trước khi tính LBP — LBP KHÔNG bất biến scale,
+# cùng một người ở mức zoom UI khác sẽ ra phân bố code khác. Cùng tinh thần
+# với ai_model resize mọi crop về input cố định.
+APPEARANCE_NORMALIZED_SIZE = (64, 128)
+
+# Bỏ qua crop quá phẳng (std độ xám dưới ngưỡng này): vùng phẳng bật hết 8 bit
+# LBP nên hai crop không texture sẽ "giống nhau 1.0" dù thực tế khác hẳn.
+# Crop thẻ thật đo được std 38–54, nên 6.0 chỉ chặn ảnh gần như trống.
+APPEARANCE_MIN_TEXTURE_STD = 6.0
 
 # ============================================================
 # LOGGING

@@ -1,9 +1,18 @@
 ---
 name: pose_matching_research_plan
-description: Plan for adding pose/keypoint matching to improve ReID robustness
+description: SUPERSEDED — pose failed real-data PoC; replaced by LBP appearance signal
 metadata:
   type: project
 ---
+
+> **⚠️ SUPERSEDED (2026-08-18).** Pose matching was built and PoC-tested but did
+> NOT separate identities on the real result-card thumbnails (same-person and
+> different-person similarity fully overlap — everyone stands the same way, so a
+> position/scale-invariant skeleton collapses to a near-identical descriptor).
+> The pose module and its tests were removed. The fourth signal is now an **LBP
+> clothing-texture descriptor** (`appearance_extractor.py`, PoC in
+> `poc_appearance_matching.py`). This document is kept only as the record of the
+> negative result. See the project memory `pose-matching-poc-result` for numbers.
 
 ## Pose Matching Enhancement Plan
 
