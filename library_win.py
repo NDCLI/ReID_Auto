@@ -390,7 +390,24 @@ class LibraryWindow(ctk.CTkToplevel):
                 return
 
         self.attributes("-topmost", False)
-        ImageEditorWindow(self, edit_img, on_save_callback=self._on_editor_saved)
+        item = self.items[self.current_index]
+        ImageEditorWindow(
+            self,
+            edit_img,
+            on_save_callback=self._on_editor_saved,
+            library_dir=os.path.dirname(item["path"]),
+            current_path=item["path"],
+            on_path_saved_callback=self._on_editor_path_saved,
+        )
+
+    def _on_editor_path_saved(self, path, _new_bgr):
+        """Đồng bộ danh sách/preview khi editor lưu một ảnh trong dải thư viện."""
+        self.refresh()
+        for index, item in enumerate(self.items):
+            if os.path.normcase(item["path"]) == os.path.normcase(path):
+                self.current_index = index
+                self._show_current()
+                break
 
     def _on_editor_saved(self, new_bgr):
         if not self.items:

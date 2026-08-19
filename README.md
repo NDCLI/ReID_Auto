@@ -38,6 +38,9 @@ Công cụ tự động hóa nhận diện nhân vật Re-ID và tự động v�
    * Click chuột trái 1 lần hoặc click phải để chọn nhanh thư mục mẫu.
 8. **Cửa sổ Review tiện dụng**:
    * Cho phép nhấn `Esc` để đóng/tắt nhanh cửa sổ Review kết quả.
+   * Nút **Ảnh chụp** mở thẳng **CẮT / SỬA** (không còn cửa sổ thư viện ảnh chụp riêng), chọn ảnh mới nhất hoặc ảnh vừa chọn trước đó. Thư mục rỗng được thông báo thân thiện.
+   * Sidebar thumbnail cuộn dọc bên trái hiển thị ảnh cùng thư mục: click để chuyển ảnh; kéo qua ngưỡng nhỏ sẽ hiện ảnh nổi theo con trỏ, và canvas viền xanh với chỉ dẫn **Thả để chọn ảnh ghép**. Sau khi thả, chọn **Ghép trái / Ghép phải** ở thanh ảnh chờ ghép. Thay đổi chưa lưu luôn được hỏi trước khi chuyển.
+   * Ảnh ghép giữ nguyên pixel, căn giữa dọc trên nền xám và không tự phóng lớn. Nút **Ghép trái / Ghép phải** trên thanh công cụ vẫn cho chọn file ngoài thư viện.
 
 ---
 

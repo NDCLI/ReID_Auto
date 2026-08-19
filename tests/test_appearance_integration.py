@@ -11,10 +11,11 @@ Style follows ``TestBestReferenceRejection`` in ``test_auto_marker.py``: a bare
 """
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
+import app_gui
 import auto_marker
 from appearance_extractor import AppearanceExtractor
 
@@ -333,6 +334,42 @@ class TestModelAgreementHelperIsBehaviourPreserving(unittest.TestCase):
         agree = auto_marker.TemplateMatcher._models_agree_on
         winners = {"a": [(0.9, "Query_1")], "b": []}
         self.assertTrue(agree(winners, "Query_1"))
+
+
+class TestDynamicAppearanceToggle(_AppearanceTestBase):
+    """Verify runtime toggling on the TemplateMatcher instance."""
+
+    def test_instance_flag_overrides_module_default(self):
+        self.matcher.enable_appearance_matching = True
+        result = self.classify()
+        self.assertIsNotNone(result)
+        self.assertTrue(result["appearance_rescue"])
+
+        self.matcher.enable_appearance_matching = False
+        self.assertTieIsRejected(self.classify())
+
+
+class TestAppGuiAppearanceToggle(unittest.TestCase):
+    """Verify AutoMarkerApp appearance toggle updates config, module and matcher."""
+
+    def setUp(self):
+        self.app = app_gui.AutoMarkerApp.__new__(app_gui.AutoMarkerApp)
+        self.app.enable_appearance_matching = MagicMock()
+        self.app.enable_appearance_matching.get.return_value = True
+        self.app.show_osd = MagicMock()
+        self.app.matcher = MagicMock()
+
+    def test_on_toggle_appearance_matching(self):
+        self.app.on_toggle_appearance_matching()
+        self.assertTrue(self.app.matcher.enable_appearance_matching)
+        self.assertTrue(auto_marker.ENABLE_APPEARANCE_MATCHING)
+        self.app.show_osd.assert_called_with("👕 Khớp trang phục (LBP): BẬT")
+
+        self.app.enable_appearance_matching.get.return_value = False
+        self.app.on_toggle_appearance_matching()
+        self.assertFalse(self.app.matcher.enable_appearance_matching)
+        self.assertFalse(auto_marker.ENABLE_APPEARANCE_MATCHING)
+        self.app.show_osd.assert_called_with("👕 Khớp trang phục (LBP): TẮT")
 
 
 if __name__ == "__main__":

@@ -163,9 +163,8 @@ class TemplateMatcher:
         # Giữ trong RAM chứ không cache ra file: LBP rẻ hơn nhiều so với chi phí
         # đọc đĩa, và mọi file `<img>.npz` lạ sẽ bị _prune_orphaned_cache xóa.
         self.reference_appearance = {}
-        self.appearance_extractor = (
-            AppearanceExtractor() if ENABLE_APPEARANCE_MATCHING else None
-        )
+        self.appearance_extractor = AppearanceExtractor()
+        self.enable_appearance_matching = ENABLE_APPEARANCE_MATCHING
         self.ai_extractor = AI_FeatureExtractor()
         self.query_thresholds = {}
         self._load_references(queries_dir)
@@ -557,7 +556,10 @@ class TemplateMatcher:
         APPEARANCE_RESCUE_MARGIN. The gap is the real discriminator; the floor
         alone still admits over half of different-person pairs.
         """
-        if not ENABLE_APPEARANCE_MATCHING or candidate_bgr is None:
+        enabled = getattr(self, "enable_appearance_matching", None)
+        if enabled is None:
+            enabled = ENABLE_APPEARANCE_MATCHING
+        if not enabled or candidate_bgr is None:
             return None
         extractor = getattr(self, "appearance_extractor", None)
         if extractor is None or not extractor.is_valid:

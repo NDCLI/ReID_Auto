@@ -27,6 +27,7 @@ from config import (
     MATCH_THRESHOLD,
     POLL_INTERVAL,
     ENABLE_OCR_TIMESTAMP_FILTER,
+    ENABLE_APPEARANCE_MATCHING,
     VERBOSE_LOGGING,
     RESOURCE_DIR,
 )
@@ -313,7 +314,7 @@ class GlobalHotkeyManager:
         from ctypes import wintypes
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
-        
+
         # Hotkey IDs
         HOTKEY_PREV = 100
         HOTKEY_NEXT = 101
@@ -322,7 +323,7 @@ class GlobalHotkeyManager:
         HOTKEY_CAPTURE_LAST_REGION = 105
         HOTKEY_CAPTURE_REGION_FROM_BLAZE = 106
         HOTKEY_NUM_BASE = 200 # 200 to 209 for 0 to 9
-        
+
         # Modifiers: Ctrl (0x0002) + Shift (0x0004) = 0x0006.
         # Only one variant runs at a time, so this matches the original
         # ReID Auto Draw's Ctrl+Shift shortcuts instead of stacking Alt on top.
@@ -708,16 +709,16 @@ class GlobalHotkeyManager:
                 self._select_index(all_options, 0)
             elif digit < len(all_options):
                 self._select_index(all_options, digit)
-                
+
     def _select_index(self, all_options, index):
         selection = all_options[index]
         self.app.cmb_queries.set(selection)
         self.app.on_query_selected(selection)
-        
+
         display_name = selection
         if selection == "Tất cả (Root queries folder)":
             display_name = "Thư mục gốc (Tất cả)"
-            
+
         # Display the custom fast-refreshing OSD overlay
         self.app.show_osd(f"📁 Folder: {display_name}")
 
@@ -752,7 +753,7 @@ class AutoMarkerApp:
         self.root.resizable(True, True)
         self.root.minsize(760, 640)
         self._ui_icon_images = []
-        
+
         # Monitoring and Log state
         self.is_monitoring = False
         self.log_queue = queue.Queue()
@@ -789,9 +790,10 @@ class AutoMarkerApp:
         # Direct screen captures are useful as an audit trail, but can be
         # disabled per session without affecting matching or Query collection.
         self.save_direct_captures = tk.BooleanVar(value=True)
-        
+        self.enable_appearance_matching = tk.BooleanVar(value=ENABLE_APPEARANCE_MATCHING)
+
         self.current_queries_dir = QUERIES_DIR
-        
+
         self.setup_ui()
         # Derive the minimum from the actual widget request after CTk has
         # applied the current DPI/font scaling.  A hard-coded minimum can be
@@ -802,18 +804,18 @@ class AutoMarkerApp:
             max(640, self.root.winfo_reqheight() + 8),
         )
         self.process_logs()
-        
+
         # Tray Icon setup - dời lịch khởi chạy sau 1 giây
         self.tray_icon = None
         self.root.after(1000, self.setup_tray)
-        
+
         # Tự động BẬT ngay khi mở app
         self.root.after(500, self.start_marker)
-        
+
         # Initialize Global Hotkey Manager
         self.hotkey_manager = GlobalHotkeyManager(self)
         self.hotkey_manager.start()
-        
+
         # Khởi động ẩn dưới khay hệ thống (Tray Icon)
         self.root.withdraw()
 
@@ -1094,6 +1096,28 @@ class AutoMarkerApp:
         )
         self.btn_next_capture_query.pack(side=tk.LEFT)
 
+        # Separator before appearance toggle
+        ctk.CTkFrame(
+            row2, fg_color=UI_COLORS["border"], width=1, height=18,
+        ).pack(side=tk.LEFT, padx=(10, 10))
+
+        self.chk_appearance = ctk.CTkCheckBox(
+            row2,
+            text="Khớp trang phục (LBP)",
+            variable=self.enable_appearance_matching,
+            command=self.on_toggle_appearance_matching,
+            onvalue=True,
+            offvalue=False,
+            checkbox_width=17,
+            checkbox_height=17,
+            font=("Segoe UI", 9),
+            text_color="#D6E2F1",
+            fg_color=UI_COLORS["primary"],
+            hover_color=UI_COLORS["primary_hover"],
+            border_color="#70839C",
+        )
+        self.chk_appearance.pack(side=tk.LEFT, padx=(0, 6))
+
         # Body: sidebar (left) + content (right)
         body = ctk.CTkFrame(self.root, fg_color="transparent")
         body.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
@@ -1207,7 +1231,7 @@ class AutoMarkerApp:
             highlightbackground=UI_COLORS["border"],
         )
         log_frame.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 14))
-        
+
         scrollbar = ctk.CTkScrollbar(log_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
@@ -1417,6 +1441,23 @@ class AutoMarkerApp:
         self.show_osd(f"📥 Ảnh chụp → {selection}")
         self.update_queries_dropdown()
 
+    def on_toggle_appearance_matching(self):
+        """Handle toggling appearance (clothing texture) matching."""
+        is_enabled = self.enable_appearance_matching.get()
+        import config
+        import auto_marker
+        config.ENABLE_APPEARANCE_MATCHING = is_enabled
+        auto_marker.ENABLE_APPEARANCE_MATCHING = is_enabled
+        if getattr(self, "matcher", None) is not None:
+            self.matcher.enable_appearance_matching = is_enabled
+            if is_enabled and getattr(self.matcher, "appearance_extractor", None) is None:
+                from appearance_extractor import AppearanceExtractor
+                self.matcher.appearance_extractor = AppearanceExtractor()
+
+        status_str = "BẬT" if is_enabled else "TẮT"
+        print(f"[APPEARANCE] Đã {status_str} tính năng nhận diện kết cấu trang phục (LBP).")
+        self.show_osd(f"👕 Khớp trang phục (LBP): {status_str}")
+
     def select_next_empty_capture_query(self):
         """Select the first empty/missing Query slot, scanning existing folders dynamically."""
         valid_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp')
@@ -1448,15 +1489,15 @@ class AutoMarkerApp:
         self.auto_query_capture_enabled = bool(self.auto_query_capture.get())
         state = "BẬT" if self.auto_query_capture_enabled else "TẮT"
         print(f"[AUTO QUERY] Tự thu thập ảnh người từ Clipboard: {state}")
-            
+
     def on_query_selected(self, selection):
         if selection == "Tất cả (Root queries folder)":
             self.current_queries_dir = QUERIES_DIR
         else:
             self.current_queries_dir = os.path.join(QUERIES_DIR, selection)
-            
+
         print(f"Đã chuyển thư mục: {self.current_queries_dir}")
-        
+
         # The matcher always loads the root Query set once. Switching the active
         # folder only swaps a small in-memory view, so the Tk event loop is not
         # blocked by model construction and feature extraction on every click.
@@ -1685,47 +1726,55 @@ class AutoMarkerApp:
                 messagebox.showerror("Lỗi", f"Lỗi khi xóa: {str(e)}")
 
     def open_capture_library(self):
-        """Open a library window browsing the region-capture screenshots."""
-        # Use the first configured capture directory.
+        """Open captured screenshots directly in the integrated image editor."""
         capture_dir = DIRECT_CAPTURE_SAVE_DIRS[0] if DIRECT_CAPTURE_SAVE_DIRS else None
         if not capture_dir:
+            messagebox.showinfo("Ảnh chụp", "Chưa cấu hình được thư mục ảnh chụp.")
             return
-        from library_win import LibraryWindow
-        existing = getattr(self, "capture_library_window", None)
+
+        from image_editor import ImageEditorWindow, list_library_images
+        import cv2
+
+        existing = getattr(self, "capture_editor_window", None)
         try:
             if existing is not None and existing.winfo_exists():
                 existing.lift()
                 existing.focus_force()
                 return
         except (tk.TclError, AttributeError):
-            pass
+            self.capture_editor_window = None
 
-        def on_close():
-            self.capture_library_window = None
-            # Keep the capture library consistent with the saved-results
-            # library: the main configuration window stays hidden until the
-            # library is closed.
-            try:
-                self.root.deiconify()
-                self.root.after(10, self.root.focus_force)
-            except (tk.TclError, AttributeError):
-                pass
-
-        self.root.withdraw()
-        try:
-            self.capture_library_window = LibraryWindow(
-                self.root,
-                capture_dir,
-                on_close=on_close,
-                matcher=self.matcher,
-                enable_editor=True,
+        paths = list_library_images(capture_dir)
+        if not paths:
+            os.makedirs(capture_dir, exist_ok=True)
+            messagebox.showinfo(
+                "Ảnh chụp",
+                "Thư mục ảnh chụp đang trống. Hãy chụp và bật ‘Lưu ảnh’ trước khi mở.",
+                parent=self.root,
             )
-        except Exception:
-            # Do not leave the application hidden if the library could not be
-            # created (for example, when the capture directory is unavailable).
-            self.capture_library_window = None
-            self.root.deiconify()
-            raise
+            return
+
+        preferred = getattr(self, "last_capture_library_path", None)
+        current_path = preferred if preferred in paths else paths[0]
+        image = cv2.imread(current_path, cv2.IMREAD_COLOR)
+        if image is None:
+            messagebox.showerror(
+                "Không thể mở ảnh", f"Không đọc được ảnh:\n{current_path}", parent=self.root
+            )
+            return
+
+        def on_path_saved(path, _new_bgr):
+            self.last_capture_library_path = path
+
+        self.last_capture_library_path = current_path
+        self.capture_editor_window = ImageEditorWindow(
+            self.root,
+            image,
+            title="Chỉnh sửa ảnh chụp",
+            library_dir=capture_dir,
+            current_path=current_path,
+            on_path_saved_callback=on_path_saved,
+        )
 
     def open_image_editor_standalone(self):
         """Open a file dialog and edit the selected image."""
@@ -1816,7 +1865,7 @@ class AutoMarkerApp:
 
         self.is_monitoring = True
         self._set_status_dot("#EF4444")
-        
+
         def _init_ai_thread():
             try:
                 # Reuse existing matcher to avoid recompiling OpenVINO models
@@ -1838,16 +1887,17 @@ class AutoMarkerApp:
                             "  [OCR] Sẵn sàng đọc thời gian trên thẻ sau "
                             f"{time.perf_counter() - ocr_started:.2f}s"
                         )
-                
+
                 def _on_init_complete():
                     if not getattr(self, 'is_monitoring', False):
                         return  # Application is shutting down during init.
-                    
+
                     self.matcher = matcher
+                    self.matcher.enable_appearance_matching = self.enable_appearance_matching.get()
                     self._matcher_reference_cache = self.matcher.reference_images
                     self._matcher_query_image_cache = self.matcher.query_images
                     self._apply_matcher_query_selection()
-                    
+
                     if getattr(self, "query_collector", None) is None:
                         self.query_collector = QueryAutoCollector(
                             QUERIES_DIR, self.matcher.ai_extractor
@@ -1856,10 +1906,10 @@ class AutoMarkerApp:
                     # Retain the image hash only as a fallback for platforms
                     # where a clipboard sequence number is unavailable.
                     self.last_clipboard_hash = get_clipboard_image_hash()
-                    
+
                     self._set_status_dot("#22C55E")
                     self.poll_clipboard()
-                    
+
                 self.root.after(0, _on_init_complete)
             except Exception as e:
                 import traceback
@@ -2254,7 +2304,7 @@ class AutoMarkerApp:
                 detected_at = time.perf_counter()
                 self.is_processing = True
                 print(f"  [CAPTURE] Đã chỉnh sửa {capture_label}; đang nhận diện...")
-                
+
                 threading.Thread(
                     target=self.process_clipboard_image,
                     args=(edited_pil, detected_at),
@@ -2265,7 +2315,7 @@ class AutoMarkerApp:
             root = getattr(self, "root", None)
             if root is not None:
                 root.attributes("-topmost", False)
-            
+
             def on_editor_cancelled():
                 # Restore main window if user cancels
                 try:
@@ -2274,8 +2324,16 @@ class AutoMarkerApp:
                 except (tk.TclError, AttributeError):
                     pass
 
-            # Open editor window
-            ImageEditorWindow(self.root, bgr_image, on_save_callback=on_editor_saved, on_cancel_callback=on_editor_cancelled, title="Chỉnh sửa ảnh chụp")
+            # Open editor window; expose the capture library without requiring a file dialog.
+            capture_dir = DIRECT_CAPTURE_SAVE_DIRS[0] if DIRECT_CAPTURE_SAVE_DIRS else None
+            ImageEditorWindow(
+                self.root,
+                bgr_image,
+                on_save_callback=on_editor_saved,
+                on_cancel_callback=on_editor_cancelled,
+                title="Chỉnh sửa ảnh chụp",
+                library_dir=capture_dir,
+            )
         else:
             if self._should_save_direct_capture():
                 saved_path = self._save_direct_capture_image(pil_img)
@@ -2315,12 +2373,12 @@ class AutoMarkerApp:
     def poll_clipboard(self):
         if not getattr(self, 'is_monitoring', False):
             return
-            
+
         # Skip clipboard checking if we are already processing or if a review window is currently open
         if getattr(self, 'is_processing', False):
             self.root.after(self.clipboard_poll_ms, self.poll_clipboard)
             return
-            
+
         if getattr(self, 'active_preview_window', None) is not None:
             try:
                 if self.active_preview_window.winfo_exists():
@@ -2329,7 +2387,7 @@ class AutoMarkerApp:
                 self.active_preview_window = None
             except (tk.TclError, AttributeError):
                 self.active_preview_window = None
-                
+
         try:
             sequence = get_clipboard_sequence_number()
             clipboard_changed = False
@@ -2424,7 +2482,7 @@ class AutoMarkerApp:
                             )
         except (OSError, ValueError, TypeError) as e:
             print(f"  [CLIPBOARD POLL ERROR] {e}")
-            
+
         self.root.after(self.clipboard_poll_ms, self.poll_clipboard)
 
     def process_clipboard_image(self, pil_img, detected_at=None):
@@ -2432,10 +2490,10 @@ class AutoMarkerApp:
             import cv2
             import numpy as np
             import time
-            
+
             # Convert PIL to BGR for OpenCV
             current_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-            
+
             # A portrait crop is a Query sample; a Re-ID UI screenshot is a
             # search result that needs boxes. Both arrive through Clipboard.
             # NOTE: The editor is intentionally NOT opened here — clipboard images
@@ -2472,11 +2530,11 @@ class AutoMarkerApp:
                 print("  [INFO] Clipboard không phải giao diện Re-ID; đã bỏ qua.")
                 self.is_processing = False
                 return
-                
+
             start_time = time.time()
             matches = self.matcher.find_matches(current_bgr, debug=False)
             elapsed = time.time() - start_time
-            
+
             if not matches:
                 print("  [RESULT] No matches found.")
                 try:
@@ -2542,12 +2600,12 @@ class AutoMarkerApp:
             if not os.path.exists(template_path):
                 print(f"  [WARN] UI template not found at {template_path}. Skipping validation.")
                 return False
-                
+
             template = cv2.imread(template_path)
             if template is None:
                 print("  [WARN] Failed to load UI template. Skipping validation.")
                 return False
-                
+
             gray_img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
             gray_temp = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
 
@@ -2565,7 +2623,7 @@ class AutoMarkerApp:
 
             if h < th or w < tw:
                 return False
-                
+
             # Match at multiple scales to handle resolution changes
             scales = [0.8, 0.9, 1.0, 1.1, 1.2]
             best_val = 0.0
@@ -2578,7 +2636,7 @@ class AutoMarkerApp:
                 _, max_val, _, _ = cv2.minMaxLoc(res)
                 if max_val > best_val:
                     best_val = max_val
-                    
+
             if VERBOSE_LOGGING:
                 print(f"  [REID DETECT] Best match confidence for Re-ID UI: {best_val:.4f}")
             # A threshold of 0.70 is extremely safe and robust
@@ -2636,7 +2694,7 @@ class AutoMarkerApp:
     def setup_tray(self):
         # Bind closing protocol to hide_window instead of on_closing
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
-        
+
         # Create tray icon
         try:
             self.tray_icon = pystray.Icon(
@@ -2645,11 +2703,11 @@ class AutoMarkerApp:
                 APP_NAME,
                 menu=self.create_tray_menu()
             )
-            
+
             # Start tray icon in a separate thread
             self.tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
             self.tray_thread.start()
-            
+
             # Show a startup notification letting the user know it is running in the tray
             self.root.after(500, lambda: self.tray_icon.notify(
                 "Ứng dụng đã khởi động ngầm ở khay hệ thống.",
@@ -2664,7 +2722,7 @@ class AutoMarkerApp:
         now = time.time()
         last_click = getattr(self, 'last_tray_click_time', 0.0)
         self.last_tray_click_time = now
-        
+
         if now - last_click < 0.35:  # Double click threshold is 350ms
             if getattr(self, 'left_click_timer', None) is not None:
                 try:
@@ -2707,22 +2765,31 @@ class AutoMarkerApp:
             pystray.MenuItem('Chụp vùng  (Alt+PrintScreen)', self.request_region_capture_from_tray),
             pystray.MenuItem('Chụp lại vùng trước  (Alt+S)', self.request_last_region_capture_from_tray),
             pystray.MenuItem('Chọn nhanh Folder', pystray.Menu(lambda: self.get_folder_menu_items())),
+            pystray.MenuItem('Khớp trang phục (LBP)', self.toggle_appearance_from_tray, checked=lambda item: self.enable_appearance_matching.get()),
             pystray.MenuItem('Khởi động lại', self.restart_app),
             pystray.MenuItem('Thoát ứng dụng', self.quit_app)
         )
+
+    def toggle_appearance_from_tray(self, icon=None, item=None):
+        new_val = not self.enable_appearance_matching.get()
+        self.root.after(0, lambda: self._set_appearance_matching(new_val))
+
+    def _set_appearance_matching(self, value):
+        self.enable_appearance_matching.set(value)
+        self.on_toggle_appearance_matching()
 
     def get_folder_menu_items(self):
         if not os.path.exists(QUERIES_DIR):
             os.makedirs(QUERIES_DIR, exist_ok=True)
         folders = [d for d in os.listdir(QUERIES_DIR) if os.path.isdir(os.path.join(QUERIES_DIR, d))]
-        
+
         import re
         def natural_sort_key(s):
             return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
         folders.sort(key=natural_sort_key)
-        
+
         menu_items = []
-        
+
         # Root option
         menu_items.append(
             pystray.MenuItem(
@@ -2731,7 +2798,7 @@ class AutoMarkerApp:
                 checked=self.make_tray_checked_handler(QUERIES_DIR)
             )
         )
-        
+
         for f in folders:
             folder_path = os.path.join(QUERIES_DIR, f)
             menu_items.append(
@@ -2741,7 +2808,7 @@ class AutoMarkerApp:
                     checked=self.make_tray_checked_handler(folder_path)
                 )
             )
-            
+
         return menu_items
 
     def make_tray_select_handler(self, folder_name):
@@ -2786,18 +2853,18 @@ class AutoMarkerApp:
         font = tkfont.Font(family="Segoe UI", size=13, weight="bold")
         text_width = font.measure(text)
         text_height = font.metrics("linespace")
-        
+
         # Calculate window dimensions with padding
         padx = 25
         pady = 10
         w = text_width + padx * 2
         h = text_height + pady * 2
-        
+
         # Center in the upper part of the screen
         ws = self.root.winfo_screenwidth()
         x = (ws - w) // 2
         y = 80  # 80px from top
-        
+
         # Create OSD window if not exists
         if not getattr(self, 'osd_window', None) or not self.osd_window.winfo_exists():
             self.osd_window = tk.Toplevel(self.root)
@@ -2805,18 +2872,18 @@ class AutoMarkerApp:
             self.osd_window.attributes("-topmost", True)  # Always on top
             self.osd_window.attributes("-alpha", 0.92)  # Semi-transparent
             self.osd_window.configure(bg="#1E2228")
-            
+
             self.osd_canvas = tk.Canvas(self.osd_window, highlightthickness=0, bg="#1E2228")
             self.osd_canvas.pack(fill="both", expand=True)
         else:
             self.osd_canvas.delete("all")
-            
+
         # Update window geometry
         self.osd_window.geometry(f"{w}x{h}+{x}+{y}")
-        
+
         # Draw mathematically perfect rounded rectangle inside canvas (inset by 2px)
         self.draw_rounded_rect(self.osd_canvas, 2, 2, w - 2, h - 2, radius=12, fill="#1E2228", outline="#3B82F6", width=2)
-        
+
         # Draw text in the center
         self.osd_canvas.create_text(
             w // 2,
@@ -2825,7 +2892,7 @@ class AutoMarkerApp:
             font=("Segoe UI", 13, "bold"),
             fill="#FFFFFF"
         )
-        
+
         # Apply rounded corners to HWND (use same radius 12)
         try:
             hwnd = self.osd_window.winfo_id()
@@ -2834,10 +2901,10 @@ class AutoMarkerApp:
             ctypes.windll.user32.SetWindowRgn(hwnd, rgn, True)
         except (OSError, AttributeError, ctypes.ArgumentError) as e:
             print(f"Lỗi bo góc OSD: {e}")
-            
+
         # Make sure the window is visible (deiconified)
         self.osd_window.deiconify()
-        
+
         # Reset hide timer
         if getattr(self, 'osd_timer', None) is not None:
             try:
@@ -2850,23 +2917,23 @@ class AutoMarkerApp:
         fill = kwargs.get('fill', '#12151A')
         outline = kwargs.get('outline', '#3B82F6')
         width = kwargs.get('width', 2)
-        
+
         # Draw fill parts (no outlines)
         canvas.create_rectangle(x1 + radius, y1, x2 - radius, y2, fill=fill, outline="")
         canvas.create_rectangle(x1, y1 + radius, x2, y2 - radius, fill=fill, outline="")
-        
+
         # Draw 4 corner fill circles (arcs)
         canvas.create_arc(x1, y1, x1 + radius * 2, y1 + radius * 2, start=90, extent=90, fill=fill, outline="")
         canvas.create_arc(x2 - radius * 2, y1, x2, y1 + radius * 2, start=0, extent=90, fill=fill, outline="")
         canvas.create_arc(x1, y2 - radius * 2, x1 + radius * 2, y2, start=180, extent=90, fill=fill, outline="")
         canvas.create_arc(x2 - radius * 2, y2 - radius * 2, x2, y2, start=270, extent=90, fill=fill, outline="")
-        
+
         # Draw outlines (lines and arcs)
         canvas.create_line(x1 + radius, y1, x2 - radius, y1, fill=outline, width=width)
         canvas.create_line(x1 + radius, y2, x2 - radius, y2, fill=outline, width=width)
         canvas.create_line(x1, y1 + radius, x1, y2 - radius, fill=outline, width=width)
         canvas.create_line(x2, y1 + radius, x2, y2 - radius, fill=outline, width=width)
-        
+
         canvas.create_arc(x1, y1, x1 + radius * 2, y1 + radius * 2, start=90, extent=90, style="arc", outline=outline, width=width)
         canvas.create_arc(x2 - radius * 2, y1, x2, y1 + radius * 2, start=0, extent=90, style="arc", outline=outline, width=width)
         canvas.create_arc(x1, y2 - radius * 2, x1 + radius * 2, y2, start=180, extent=90, style="arc", outline=outline, width=width)
@@ -2910,7 +2977,7 @@ class AutoMarkerApp:
 if __name__ == "__main__":
     import ctypes
     from tkinter import messagebox
-    
+
     # Single instance check. The variant owns a different mutex than the
     # original app, so both can be running at the same time while each still
     # refuses to start twice.

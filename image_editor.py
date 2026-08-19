@@ -4,7 +4,151 @@ from PIL import Image, ImageTk
 import cv2
 import numpy as np
 import os
+from dataclasses import dataclass
 from config import RESOURCE_DIR
+
+
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff")
+
+
+def list_library_images(directory: str | None) -> list[str]:
+    """Liệt kê ảnh hợp lệ trực tiếp trong thư mục, mới nhất trước.
+
+    Không đọc nội dung/full resolution tại bước này; file lỗi sẽ được bỏ qua khi
+    tạo thumbnail hoặc lúc người dùng mở ảnh.
+    """
+    if not directory or not os.path.isdir(directory):
+        return []
+    entries = []
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return []
+    for name in names:
+        path = os.path.join(directory, name)
+        if not os.path.isfile(path) or not name.lower().endswith(IMAGE_EXTENSIONS):
+            continue
+        if name.lower().startswith("original_"):
+            continue
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+        entries.append((mtime, name.lower(), os.path.abspath(path)))
+    entries.sort(key=lambda item: (-item[0], item[1]))
+    return [item[2] for item in entries]
+
+
+@dataclass
+class PendingMergeState:
+    """Trạng thái thuần Python cho ảnh thumbnail đang chờ ghép."""
+
+    path: str | None = None
+
+    def set(self, path: str | None) -> None:
+        self.path = os.path.abspath(path) if path else None
+
+    def clear(self) -> None:
+        self.path = None
+
+    def consume(self) -> str | None:
+        path, self.path = self.path, None
+        return path
+
+
+@dataclass
+class ThumbnailDragState:
+    """Logic kéo-thả độc lập UI để có thể kiểm thử không cần display."""
+
+    threshold: int = 8
+    start: tuple[int, int] | None = None
+    active: bool = False
+    over_drop_zone: bool = False
+
+    def press(self, x: int, y: int) -> None:
+        self.start = (x, y)
+        self.active = False
+        self.over_drop_zone = False
+
+    def update(self, x: int, y: int, bounds: tuple[int, int, int, int]) -> bool:
+        if self.start is None:
+            return False
+        if not self.active:
+            dx, dy = x - self.start[0], y - self.start[1]
+            self.active = dx * dx + dy * dy >= self.threshold * self.threshold
+        self.over_drop_zone = self.active and point_in_bounds(x, y, bounds)
+        return self.active
+
+    def release(self, x: int, y: int, bounds: tuple[int, int, int, int]) -> str:
+        if self.start is None:
+            result = "idle"
+        else:
+            self.update(x, y, bounds)
+            result = "drop" if self.active and self.over_drop_zone else (
+                "cancel" if self.active else "click"
+            )
+        self.reset()
+        return result
+
+    def reset(self) -> None:
+        self.start = None
+        self.active = False
+        self.over_drop_zone = False
+
+
+def point_in_bounds(x: int, y: int, bounds: tuple[int, int, int, int]) -> bool:
+    left, top, right, bottom = bounds
+    return left <= x <= right and top <= y <= bottom
+
+
+def merge_images_side_by_side(
+    current_bgr: np.ndarray,
+    added_bgr: np.ndarray,
+    side: str,
+    background_color=(127, 127, 127),
+) -> np.ndarray:
+    """Ghép hai ảnh BGR cạnh nhau, căn giữa theo chiều dọc.
+
+    Ảnh không bị co giãn nên giữ nguyên tỷ lệ và chất lượng. Phần trống do hai
+    ảnh khác chiều cao được tô bằng nền xám trung tính.
+    """
+    if side not in {"left", "right"}:
+        raise ValueError("side phải là 'left' hoặc 'right'")
+    if not isinstance(current_bgr, np.ndarray) or not isinstance(added_bgr, np.ndarray):
+        raise TypeError("Ảnh ghép phải là numpy.ndarray")
+    if current_bgr.ndim != 3 or added_bgr.ndim != 3:
+        raise ValueError("Ảnh ghép phải có dạng H x W x C")
+    if current_bgr.shape[2] != added_bgr.shape[2]:
+        raise ValueError("Hai ảnh phải có cùng số kênh màu")
+    if current_bgr.size == 0 or added_bgr.size == 0:
+        raise ValueError("Không thể ghép ảnh rỗng")
+
+    height = max(current_bgr.shape[0], added_bgr.shape[0])
+    width = current_bgr.shape[1] + added_bgr.shape[1]
+    channels = current_bgr.shape[2]
+    color = np.asarray(background_color, dtype=current_bgr.dtype).reshape(-1)
+    if color.size != channels:
+        raise ValueError("Màu nền phải khớp số kênh của ảnh")
+
+    result = np.empty((height, width, channels), dtype=current_bgr.dtype)
+    result[...] = color
+    left_image, right_image = (
+        (added_bgr, current_bgr) if side == "left" else (current_bgr, added_bgr)
+    )
+    x = 0
+    for image in (left_image, right_image):
+        y = (height - image.shape[0]) // 2
+        result[y:y + image.shape[0], x:x + image.shape[1]] = image
+        x += image.shape[1]
+    return result
+
+
+def calculate_fit_scale(image_width: int, image_height: int,
+                        canvas_width: int, canvas_height: int) -> float:
+    """Tính tỷ lệ fit-down, không bao giờ phóng ảnh vượt quá 100%."""
+    if min(image_width, image_height, canvas_width, canvas_height) <= 0:
+        raise ValueError("Kích thước ảnh và vùng xem phải lớn hơn 0")
+    return min(1.0, canvas_width / image_width, canvas_height / image_height)
 
 
 class ImageEditorWindow(ctk.CTkToplevel):
@@ -24,7 +168,8 @@ class ImageEditorWindow(ctk.CTkToplevel):
     MODE_CUTOUT = "cutout"
 
     def __init__(self, master, image_bgr: np.ndarray,
-                 on_save_callback=None, on_cancel_callback=None, title="Chỉnh sửa ảnh"):
+                 on_save_callback=None, on_cancel_callback=None, title="Chỉnh sửa ảnh",
+                 library_dir=None, current_path=None, on_path_saved_callback=None):
         super().__init__(master)
         self.title(title)
 
@@ -53,6 +198,21 @@ class ImageEditorWindow(ctk.CTkToplevel):
 
         self.on_save_callback = on_save_callback
         self.on_cancel_callback = on_cancel_callback
+        self.on_path_saved_callback = on_path_saved_callback
+        self._current_path = os.path.abspath(current_path) if current_path else None
+        self._library_dir = os.path.abspath(
+            library_dir or (os.path.dirname(self._current_path) if self._current_path else "")
+        ) if (library_dir or self._current_path) else None
+        self._library_paths: list[str] = []
+        self._thumb_cache: dict[tuple[str, float], ImageTk.PhotoImage] = {}
+        self._thumb_tiles: dict[str, tk.Label] = {}
+        self._thumb_drag_path = None
+        self._thumb_drag_state = ThumbnailDragState()
+        self._drag_ghost = None
+        self._drag_ghost_photo = None
+        self._drop_feedback_ids: list[int] = []
+        self._drop_highlighted = False
+        self._pending_merge = PendingMergeState()
         self.configure(fg_color="#15181C")
 
         # History stack
@@ -130,6 +290,20 @@ class ImageEditorWindow(ctk.CTkToplevel):
             font=("Segoe UI", 11), height=30, corner_radius=8
         ).pack(side=tk.LEFT, padx=(0,4), pady=9)
 
+        ctk.CTkButton(
+            toolbar, text="Ghép trái", width=90,
+            command=lambda: self._choose_and_merge("left"),
+            fg_color="#2A2F37", hover_color="#353B45",
+            font=("Segoe UI", 11), height=30, corner_radius=8
+        ).pack(side=tk.LEFT, padx=(8,4), pady=9)
+
+        ctk.CTkButton(
+            toolbar, text="Ghép phải", width=92,
+            command=lambda: self._choose_and_merge("right"),
+            fg_color="#2A2F37", hover_color="#353B45",
+            font=("Segoe UI", 11), height=30, corner_radius=8
+        ).pack(side=tk.LEFT, padx=(0,4), pady=9)
+
         # hint / size (right side)
         self._hint_var = tk.StringVar(value="")
         ctk.CTkLabel(toolbar, textvariable=self._hint_var,
@@ -141,9 +315,34 @@ class ImageEditorWindow(ctk.CTkToplevel):
                      text_color="#8B9DC3", font=("Segoe UI", 10)
                      ).pack(side=tk.RIGHT, padx=(0,6), pady=9)
 
-        # Canvas
-        outer = ctk.CTkFrame(self, fg_color="#12151A", corner_radius=0)
-        outer.pack(fill=tk.BOTH, expand=True)
+        # Không gian làm việc: thư viện thumbnail dọc bên trái + canvas bên phải.
+        self._library_strip = None
+        self._pending_bar = None
+        workspace = ctk.CTkFrame(self, fg_color="#12151A", corner_radius=0)
+        workspace.pack(fill=tk.BOTH, expand=True)
+
+        if self._library_dir:
+            gallery = ctk.CTkFrame(
+                workspace, fg_color="#191D23", corner_radius=0, width=190
+            )
+            gallery.pack(side=tk.LEFT, fill=tk.Y)
+            gallery.pack_propagate(False)
+            ctk.CTkLabel(
+                gallery, text="ẢNH CÙNG THƯ MỤC",
+                text_color="#8B9DC3", font=("Segoe UI", 10, "bold")
+            ).pack(anchor=tk.W, padx=10, pady=(10, 2))
+            ctk.CTkLabel(
+                gallery, text="Click để mở\nKéo vào canvas để ghép",
+                justify=tk.LEFT, text_color="#68768A", font=("Segoe UI", 9)
+            ).pack(anchor=tk.W, padx=10, pady=(0, 6))
+            self._library_strip = ctk.CTkScrollableFrame(
+                gallery, orientation="vertical", width=170, fg_color="transparent"
+            )
+            self._library_strip.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
+            self.after_idle(self._refresh_library_strip)
+
+        outer = ctk.CTkFrame(workspace, fg_color="#12151A", corner_radius=0)
+        outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self._canvas = tk.Canvas(outer, bg="#12151A",
                                  highlightthickness=0, cursor="crosshair")
@@ -153,6 +352,19 @@ class ImageEditorWindow(ctk.CTkToplevel):
         self._canvas.bind("<B1-Motion>",        self._on_drag)
         self._canvas.bind("<ButtonRelease-1>",  self._on_release)
         self._canvas.focus_set()
+
+        self._pending_bar = ctk.CTkFrame(self, fg_color="#243247", corner_radius=0)
+        self._pending_label = ctk.CTkLabel(
+            self._pending_bar, text="", text_color="#E6EAF0", font=("Segoe UI", 10, "bold")
+        )
+        self._pending_label.pack(side=tk.LEFT, padx=12, pady=6)
+        ctk.CTkButton(self._pending_bar, text="Ghép trái", width=90, height=26,
+                      command=lambda: self._merge_pending("left")).pack(side=tk.RIGHT, padx=4, pady=4)
+        ctk.CTkButton(self._pending_bar, text="Ghép phải", width=90, height=26,
+                      command=lambda: self._merge_pending("right")).pack(side=tk.RIGHT, padx=4, pady=4)
+        ctk.CTkButton(self._pending_bar, text="Bỏ", width=55, height=26,
+                      fg_color="#2A2F37", command=self._clear_pending_merge).pack(
+                          side=tk.RIGHT, padx=(4, 12), pady=4)
 
         # Bottom bar
         bot = ctk.CTkFrame(self, fg_color="transparent")
@@ -173,6 +385,261 @@ class ImageEditorWindow(ctk.CTkToplevel):
         ).pack(side=tk.RIGHT, padx=5)
 
         self._set_mode(self.MODE_CROP)
+
+    def _refresh_library_strip(self):
+        if not self._library_strip:
+            return
+        self._cleanup_thumbnail_drag()
+        for child in self._library_strip.winfo_children():
+            child.destroy()
+        self._thumb_tiles = {}
+        self._library_paths = list_library_images(self._library_dir)
+        valid_cache = {}
+        for path in self._library_paths:
+            try:
+                mtime = os.path.getmtime(path)
+                key = (path, mtime)
+                photo = self._thumb_cache.get(key)
+                if photo is None:
+                    with Image.open(path) as source:
+                        thumb = source.convert("RGB")
+                        thumb.thumbnail((92, 58), Image.Resampling.LANCZOS)
+                        photo = ImageTk.PhotoImage(thumb.copy())
+                valid_cache[key] = photo
+            except (OSError, ValueError, tk.TclError):
+                continue
+            selected = self._current_path and os.path.normcase(path) == os.path.normcase(self._current_path)
+            tile = tk.Label(
+                self._library_strip, image=photo, text=os.path.basename(path), compound=tk.TOP,
+                bg="#214F7A" if selected else "#242A31", fg="white", padx=4, pady=3,
+                font=("Segoe UI", 8), cursor="hand2"
+            )
+            tile.pack(fill=tk.X, padx=3, pady=3)
+            self._thumb_tiles[path] = tile
+            tile.bind("<ButtonPress-1>", lambda e, p=path: self._thumbnail_press(e, p))
+            tile.bind("<B1-Motion>", self._thumbnail_drag)
+            tile.bind("<ButtonRelease-1>", lambda e, p=path: self._thumbnail_release(e, p))
+        self._thumb_cache = valid_cache
+
+    def _canvas_root_bounds(self):
+        x, y = self._canvas.winfo_rootx(), self._canvas.winfo_rooty()
+        return x, y, x + self._canvas.winfo_width(), y + self._canvas.winfo_height()
+
+    def _thumbnail_press(self, event, path):
+        self._cleanup_thumbnail_drag()
+        self._thumb_drag_path = path
+        self._thumb_drag_state.press(event.x_root, event.y_root)
+
+    def _thumbnail_drag(self, event):
+        path = self._thumb_drag_path
+        if not path:
+            return
+        try:
+            was_active = self._thumb_drag_state.active
+            active = self._thumb_drag_state.update(
+                event.x_root, event.y_root, self._canvas_root_bounds()
+            )
+            if not active:
+                return
+            if not was_active:
+                self._start_drag_visual(path)
+            self._move_drag_ghost(event.x_root, event.y_root)
+            self._set_drop_highlight(self._thumb_drag_state.over_drop_zone)
+        except (OSError, ValueError, tk.TclError):
+            self._cleanup_thumbnail_drag()
+
+    def _start_drag_visual(self, path):
+        tile = self._thumb_tiles.get(path)
+        if tile:
+            tile.configure(bg="#0F6B78", relief=tk.SOLID, bd=2)
+        with Image.open(path) as source:
+            image = source.convert("RGB")
+            image.thumbnail((112, 74), Image.Resampling.LANCZOS)
+            self._drag_ghost_photo = ImageTk.PhotoImage(image.copy())
+        ghost = tk.Toplevel(self)
+        ghost.overrideredirect(True)
+        try:
+            ghost.attributes("-topmost", True)
+            ghost.attributes("-alpha", 0.92)
+        except tk.TclError:
+            pass
+        frame = tk.Frame(ghost, bg="#38BDF8", padx=2, pady=2)
+        frame.pack()
+        tk.Label(
+            frame, image=self._drag_ghost_photo, text=os.path.basename(path),
+            compound=tk.TOP, bg="#17212B", fg="white", padx=6, pady=5,
+            font=("Segoe UI", 9, "bold"),
+        ).pack()
+        self._drag_ghost = ghost
+        self.configure(cursor="hand2")
+
+    def _move_drag_ghost(self, x_root, y_root):
+        if self._drag_ghost:
+            self._drag_ghost.geometry(f"+{x_root + 16}+{y_root + 18}")
+
+    def _set_drop_highlight(self, enabled):
+        if enabled == self._drop_highlighted:
+            return
+        self._clear_drop_highlight()
+        self._drop_highlighted = enabled
+        if enabled:
+            width, height = self._canvas.winfo_width(), self._canvas.winfo_height()
+            self._drop_feedback_ids = [
+                self._canvas.create_rectangle(
+                    5, 5, width - 6, height - 6, outline="#22C55E", width=4,
+                    dash=(10, 5), fill="#12351F", stipple="gray75",
+                ),
+                self._canvas.create_text(
+                    width // 2 + 1, 42 + 1, text="Thả để chọn ảnh ghép",
+                    fill="#000000", font=("Segoe UI", 14, "bold"),
+                ),
+                self._canvas.create_text(
+                    width // 2, 42, text="Thả để chọn ảnh ghép",
+                    fill="#86EFAC", font=("Segoe UI", 14, "bold"),
+                ),
+            ]
+
+    def _clear_drop_highlight(self):
+        for item in self._drop_feedback_ids:
+            try:
+                self._canvas.delete(item)
+            except tk.TclError:
+                pass
+        self._drop_feedback_ids = []
+        self._drop_highlighted = False
+
+    def _cleanup_thumbnail_drag(self):
+        self.configure(cursor="")
+        self._clear_drop_highlight()
+        if self._drag_ghost:
+            try:
+                self._drag_ghost.destroy()
+            except tk.TclError:
+                pass
+        self._drag_ghost = None
+        self._drag_ghost_photo = None
+        for path, tile in self._thumb_tiles.items():
+            try:
+                selected = self._current_path and os.path.normcase(path) == os.path.normcase(self._current_path)
+                tile.configure(bg="#214F7A" if selected else "#242A31", relief=tk.FLAT, bd=0)
+            except tk.TclError:
+                pass
+        self._thumb_drag_path = None
+        self._thumb_drag_state.reset()
+
+    def _thumbnail_release(self, event, path):
+        try:
+            result = self._thumb_drag_state.release(
+                event.x_root, event.y_root, self._canvas_root_bounds()
+            )
+            self._cleanup_thumbnail_drag()
+            if result == "drop":
+                self._set_pending_merge(path)
+                self._flash_drop_success()
+            elif result == "click":
+                self._open_library_image(path)
+            elif result == "cancel":
+                self._hint_var.set("Đã hủy kéo ảnh — hãy thả vào vùng canvas")
+                self.after(1100, lambda: self._set_mode(self._mode) if not self._closed else None)
+        except (OSError, ValueError, tk.TclError):
+            self._cleanup_thumbnail_drag()
+
+    def _flash_drop_success(self):
+        self._canvas.configure(highlightthickness=3, highlightbackground="#22C55E")
+        self.after(450, lambda: self._canvas.configure(highlightthickness=0) if not self._closed else None)
+
+    def _has_unsaved_changes(self):
+        return len(self._history) > 1
+
+    def _open_library_image(self, path):
+        from tkinter import messagebox
+        if self._current_path and os.path.normcase(path) == os.path.normcase(self._current_path):
+            return
+        if self._has_unsaved_changes():
+            answer = messagebox.askyesnocancel(
+                "Thay đổi chưa lưu",
+                "Lưu thay đổi của ảnh hiện tại trước khi chuyển ảnh?",
+                parent=self,
+            )
+            if answer is None:
+                return
+            if answer and not self._save_current_path():
+                return
+        image = cv2.imread(path, cv2.IMREAD_COLOR)
+        if image is None:
+            messagebox.showerror("Không thể mở ảnh", f"Không đọc được ảnh:\n{path}", parent=self)
+            return
+        self._current_path = os.path.abspath(path)
+        self._current_bgr = image
+        self._history = [image.copy()]
+        self._clear_pending_merge()
+        self._draw_image()
+        self._refresh_library_strip()
+
+    def _save_current_path(self):
+        from tkinter import messagebox
+        if not self._current_path:
+            return False
+        if not cv2.imwrite(self._current_path, self._current_bgr):
+            messagebox.showerror("Không thể lưu", f"Không ghi được ảnh:\n{self._current_path}", parent=self)
+            return False
+        self._history = [self._current_bgr.copy()]
+        self._thumb_cache.clear()
+        if self.on_path_saved_callback:
+            self.on_path_saved_callback(self._current_path, self._current_bgr.copy())
+        self._refresh_library_strip()
+        return True
+
+    def _set_pending_merge(self, path):
+        self._pending_merge.set(path)
+        self._pending_label.configure(text=f"Ảnh chờ ghép: {os.path.basename(path)}")
+        if not self._pending_bar.winfo_ismapped():
+            self._pending_bar.pack(side=tk.BOTTOM, fill=tk.X, before=self._pending_bar.master.winfo_children()[-1])
+
+    def _clear_pending_merge(self):
+        self._pending_merge.clear()
+        if self._pending_bar and self._pending_bar.winfo_ismapped():
+            self._pending_bar.pack_forget()
+
+    def _merge_pending(self, side):
+        path = self._pending_merge.path
+        if path:
+            self._merge_path(path, side)
+
+    def _merge_path(self, path, side):
+        from tkinter import messagebox
+        added_bgr = cv2.imread(path, cv2.IMREAD_COLOR)
+        if added_bgr is None:
+            messagebox.showerror("Không thể ghép ảnh", f"Không đọc được ảnh:\n{path}", parent=self)
+            return False
+        new_bgr = merge_images_side_by_side(self._current_bgr, added_bgr, side)
+        self._history.append(new_bgr.copy())
+        self._current_bgr = new_bgr
+        self._clear_selection()
+        self._clear_pending_merge()
+        self._draw_image()
+        return True
+
+    def _choose_and_merge(self, side: str):
+        """Chọn ảnh ngoài thư viện từ đĩa rồi ghép trái/phải."""
+        from tkinter import filedialog, messagebox
+
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Chọn ảnh để ghép",
+            filetypes=[
+                ("Ảnh", "*.png *.jpg *.jpeg *.bmp *.webp *.tiff"),
+                ("Tất cả", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        added_bgr = cv2.imread(path, cv2.IMREAD_COLOR)
+        if added_bgr is None:
+            messagebox.showerror("Không thể ghép ảnh", f"Không đọc được ảnh:\n{path}", parent=self)
+            return
+
+        self._merge_path(path, side)
 
     def _bind_shortcuts(self):
         """Bind on the Toplevel so shortcuts fire while any child has focus."""
@@ -210,7 +677,7 @@ class ImageEditorWindow(ctk.CTkToplevel):
         ch = max(10, self._canvas.winfo_height())
 
         if refit:
-            self._scale = min(cw / iw, ch / ih)
+            self._scale = calculate_fit_scale(iw, ih, cw, ch)
         nw = int(iw * self._scale)
         nh = int(ih * self._scale)
         self._off_x = (cw - nw) // 2
@@ -441,7 +908,9 @@ class ImageEditorWindow(ctk.CTkToplevel):
             self._draw_image()
 
     def _clear_sel_or_cancel(self):
-        if self._has_sel:
+        if self._thumb_drag_state.start is not None or self._drag_ghost:
+            self._cleanup_thumbnail_drag()
+        elif self._has_sel:
             self._clear_selection()
             self._redraw_overlay()
         else:
@@ -454,14 +923,21 @@ class ImageEditorWindow(ctk.CTkToplevel):
     def _save(self):
         if self._closed:
             return
-        self._closed = True
-        if self.on_save_callback:
+        self._cleanup_thumbnail_drag()
+        # Ảnh duyệt từ dải thư viện được ghi đúng vào path đang chọn. Luồng cũ
+        # (không truyền current_path) vẫn trả ndarray qua callback như trước.
+        if self._current_path:
+            if not self._save_current_path():
+                return
+        elif self.on_save_callback:
             self.on_save_callback(self._current_bgr.copy())
+        self._closed = True
         self.destroy()
 
     def _cancel(self):
         if self._closed:
             return
+        self._cleanup_thumbnail_drag()
         self._closed = True
         if hasattr(self, "on_cancel_callback") and self.on_cancel_callback:
             self.on_cancel_callback()
