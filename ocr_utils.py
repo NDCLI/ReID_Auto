@@ -202,11 +202,17 @@ def _rapidocr_result_items(result):
 def _rapidocr_variants(image_bgr: np.ndarray):
     """Yield enlarged bottom-card crops for RapidOCR."""
     h, w = image_bgr.shape[:2]
-    # Start with tight bands around the timestamp baseline. Wider 25-30%
-    # crops include too much of the person/background and can collapse
-    # repeated digits (for example ``1:55 PM`` -> ``1:5PM``). The 18% and 28%
-    # views independently retain that timestamp on the real Re-ID cards.
-    for bottom_pct in (0.18, 0.28, 0.20, 0.22, 0.25, 0.30):
+    # Ordered tightest-first, and that order is load-bearing: the caller stops
+    # as soon as two bands agree, so whichever bands vote first decide the
+    # reading. Wider 25-30% bands pull in the person and background above the
+    # baseline and collapse repeated digits ("11:55 AM" -> "1:55 AM"), which is
+    # a valid time belonging to no reference, so the card is dropped before it
+    # is ever compared visually. Measured over eight real cards: 0.18 was
+    # correct 8/8 with the highest confidence every time, 0.20 and 0.22 were
+    # 6/8, while 0.28 was correct only 2/8. The wide bands stay last so they
+    # can still rescue an otherwise unreadable card without outvoting a tight
+    # band that already read the time correctly.
+    for bottom_pct in (0.18, 0.20, 0.22, 0.25, 0.28, 0.30):
         bottom = image_bgr[int(h * (1 - bottom_pct)):, :]
         if bottom.shape[0] < 2 or bottom.shape[1] < 2:
             continue
